@@ -1,0 +1,10 @@
+build/
+build-release/
+dist/
+.DS_Store
+*.user
+xcuserdata/
+DerivedData/
+ThirdParty/7zip/
+Resources/AppIcon.iconset/
+Resources/AppIcon-1024.png
