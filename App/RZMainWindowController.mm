@@ -260,8 +260,15 @@ static NSString * const RZColMethod = @"method";
         NSView *host = tableScroll.superview ?: tableScroll;
         [host addSubview:pathChrome];
         [host addSubview:statusChrome];
+        // Full-size content view draws under the titlebar. Tahoe accessories
+        // sit in the safe area; here we have to clear the toolbar ourselves.
+        NSLayoutAnchor *pathTop = host.safeAreaLayoutGuide.topAnchor;
+        NSLayoutGuide *contentGuide = (NSLayoutGuide *)self.window.contentLayoutGuide;
+        if ([contentGuide isKindOfClass:[NSLayoutGuide class]]) {
+            pathTop = contentGuide.topAnchor;
+        }
         [NSLayoutConstraint activateConstraints:@[
-            [pathChrome.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
+            [pathChrome.topAnchor constraintEqualToAnchor:pathTop constant:8],
             [pathChrome.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
             [pathChrome.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
             [statusChrome.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-8],
