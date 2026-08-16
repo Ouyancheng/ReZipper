@@ -153,24 +153,6 @@ static NSString * const RZColMethod = @"method";
     tableScroll.documentView = table;
     self.tableView = table;
 
-    NSViewController *contentVC = [[NSViewController alloc] init];
-    contentVC.view = tableScroll;
-
-    NSSplitViewController *split = [[NSSplitViewController alloc] init];
-    NSSplitViewItem *sidebarItem = [NSSplitViewItem sidebarWithViewController:sidebarVC];
-    sidebarItem.canCollapse = YES;
-    sidebarItem.minimumThickness = 180;
-    sidebarItem.maximumThickness = 300;
-    NSSplitViewItem *contentItem = [NSSplitViewItem contentListWithViewController:contentVC];
-    if (@available(macOS 26.0, *)) {
-        contentItem.automaticallyAdjustsSafeAreaInsets = YES;
-    }
-    [split addSplitViewItem:sidebarItem];
-    [split addSplitViewItem:contentItem];
-    self.splitController = split;
-    self.splitView = split.splitView;
-    self.contentViewController = split;
-
     NSButton *upButton = [NSButton buttonWithImage:[self rz_symbol:@"chevron.up" size:13]
                                             target:self
                                             action:@selector(goUp:)];
@@ -240,6 +222,34 @@ static NSString * const RZColMethod = @"method";
     NSView *statusChrome = [self rz_glassWrap:statusRow cornerRadius:18];
     [statusChrome.heightAnchor constraintGreaterThanOrEqualToConstant:40].active = YES;
 
+    NSViewController *contentVC = [[NSViewController alloc] init];
+    if (@available(macOS 26.0, *)) {
+        contentVC.view = tableScroll;
+    } else {
+        tableScroll.automaticallyAdjustsContentInsets = NO;
+        tableScroll.translatesAutoresizingMaskIntoConstraints = NO;
+        NSView *column = [[NSView alloc] initWithFrame:NSZeroRect];
+        [column addSubview:pathChrome];
+        [column addSubview:tableScroll];
+        [column addSubview:statusChrome];
+        contentVC.view = column;
+    }
+
+    NSSplitViewController *split = [[NSSplitViewController alloc] init];
+    NSSplitViewItem *sidebarItem = [NSSplitViewItem sidebarWithViewController:sidebarVC];
+    sidebarItem.canCollapse = YES;
+    sidebarItem.minimumThickness = 180;
+    sidebarItem.maximumThickness = 300;
+    NSSplitViewItem *contentItem = [NSSplitViewItem contentListWithViewController:contentVC];
+    if (@available(macOS 26.0, *)) {
+        contentItem.automaticallyAdjustsSafeAreaInsets = YES;
+    }
+    [split addSplitViewItem:sidebarItem];
+    [split addSplitViewItem:contentItem];
+    self.splitController = split;
+    self.splitView = split.splitView;
+    self.contentViewController = split;
+
     if (@available(macOS 26.0, *)) {
         NSSplitViewItemAccessoryViewController *pathAccessory = [[NSSplitViewItemAccessoryViewController alloc] init];
         pathAccessory.view = pathChrome;
@@ -257,23 +267,23 @@ static NSString * const RZColMethod = @"method";
         }
         [contentItem addBottomAlignedAccessoryViewController:statusAccessory];
     } else {
-        NSView *host = tableScroll.superview ?: tableScroll;
-        [host addSubview:pathChrome];
-        [host addSubview:statusChrome];
-        // Full-size content view draws under the titlebar. Tahoe accessories
-        // sit in the safe area; here we have to clear the toolbar ourselves.
-        NSLayoutAnchor *pathTop = host.safeAreaLayoutGuide.topAnchor;
+        NSView *column = contentVC.view;
+        NSLayoutAnchor *pathTop = column.safeAreaLayoutGuide.topAnchor;
         NSLayoutGuide *contentGuide = (NSLayoutGuide *)self.window.contentLayoutGuide;
         if ([contentGuide isKindOfClass:[NSLayoutGuide class]]) {
             pathTop = contentGuide.topAnchor;
         }
         [NSLayoutConstraint activateConstraints:@[
             [pathChrome.topAnchor constraintEqualToAnchor:pathTop constant:8],
-            [pathChrome.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-            [pathChrome.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-            [statusChrome.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-8],
-            [statusChrome.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-            [statusChrome.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
+            [pathChrome.leadingAnchor constraintEqualToAnchor:column.leadingAnchor constant:12],
+            [pathChrome.trailingAnchor constraintEqualToAnchor:column.trailingAnchor constant:-12],
+            [tableScroll.topAnchor constraintEqualToAnchor:pathChrome.bottomAnchor constant:8],
+            [tableScroll.leadingAnchor constraintEqualToAnchor:column.leadingAnchor],
+            [tableScroll.trailingAnchor constraintEqualToAnchor:column.trailingAnchor],
+            [tableScroll.bottomAnchor constraintEqualToAnchor:statusChrome.topAnchor constant:-8],
+            [statusChrome.leadingAnchor constraintEqualToAnchor:column.leadingAnchor constant:12],
+            [statusChrome.trailingAnchor constraintEqualToAnchor:column.trailingAnchor constant:-12],
+            [statusChrome.bottomAnchor constraintEqualToAnchor:column.bottomAnchor constant:-8],
         ]];
     }
 }
