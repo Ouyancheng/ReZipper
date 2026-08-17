@@ -74,9 +74,7 @@ def extract_and_check(
     listed: list[dict] | None = None,
 ) -> None:
     files = spec.get("expect_files") or {}
-    if spec.get("skip_extract") or spec.get("skip_full_extract_check") and not files:
-        return
-    if not files:
+    if spec.get("skip_extract") or not files:
         return
     dest = Path(tempfile.mkdtemp(prefix="rz-stress-"))
     try:
@@ -89,11 +87,6 @@ def extract_and_check(
                     if not item["dir"]:
                         candidates.append(dest / item["path"])
             path = next((p for p in candidates if p.is_file()), None)
-            if path is None and spec.get("locale_sensitive"):
-                for found in dest.rglob("*"):
-                    if found.is_file() and found.read_bytes() == expected:
-                        path = found
-                        break
             if path is None:
                 raise Fail(f"extracted file missing: {rel} (under {dest})")
             got = path.read_bytes()
@@ -122,10 +115,10 @@ def run_one(cli: Path, lib: Path, tests_dir: Path, name: str, spec: dict) -> Non
     if spec.get("require_password_to_list"):
         try:
             run_cli(cli, lib, ["list", str(archive)])
+        except Fail:
+            pass
+        else:
             raise Fail("listing encrypted headers succeeded without a password")
-        except Fail as exc:
-            if "listing encrypted headers succeeded" in str(exc):
-                raise
     _, items = parse_list(run_cli(cli, lib, ["list", str(archive)], password=password))
 
     if spec.get("expect_file_count") is not None:
@@ -137,19 +130,8 @@ def run_one(cli: Path, lib: Path, tests_dir: Path, name: str, spec: dict) -> Non
         if folders != spec["expect_folder_count"]:
             raise Fail(f"folder count {folders} != {spec['expect_folder_count']}")
 
-    if spec.get("expect_paths") and not spec.get("locale_sensitive"):
+    if spec.get("expect_paths"):
         check_paths(items, spec["expect_paths"])
-    if spec.get("expect_any_paths"):
-        last_error = None
-        for candidate in spec["expect_any_paths"]:
-            try:
-                check_paths(items, candidate)
-                last_error = None
-                break
-            except Fail as exc:
-                last_error = exc
-        if last_error:
-            raise Fail(f"none of the accepted listings matched: {last_error}")
 
     run_cli(cli, lib, ["test", str(archive)], password=password)
     extract_and_check(cli, lib, archive, spec, password, None, items)

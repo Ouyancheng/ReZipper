@@ -2,11 +2,6 @@
 #import "RZDocument.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-static void RZApplyDialogButton(NSButton *button) {
-    button.bezelStyle = NSBezelStyleRounded;
-    button.controlSize = NSControlSizeRegular;
-}
-
 #pragma mark - Progress
 
 @interface RZProgressController ()
@@ -46,7 +41,6 @@ static void RZApplyDialogButton(NSButton *button) {
     NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancel:)];
     cancel.keyEquivalent = @"\033";
     cancel.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyDialogButton(cancel);
 
     [content addSubview:title];
     [content addSubview:status];
@@ -185,7 +179,6 @@ static void RZApplyDialogButton(NSButton *button) {
     NSButton *done = [NSButton buttonWithTitle:@"Done" target:self action:@selector(dismiss:)];
     done.keyEquivalent = @"\r";
     done.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyDialogButton(done);
 
     [window.contentView addSubview:body];
     [window.contentView addSubview:done];

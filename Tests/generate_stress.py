@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import shutil
 import struct
 import subprocess
@@ -43,10 +42,9 @@ class RawZip:
         utf8_flag: bool = True,
         directory: bool = False,
     ) -> None:
-        raw_name = name if directory or name.endswith("/") else name
-        if directory and not raw_name.endswith("/"):
-            raw_name += "/"
-        name_b = raw_name.encode(encoding)
+        if directory and not name.endswith("/"):
+            name += "/"
+        name_b = name.encode(encoding)
         method = 0
         compressed = data
         if data and not directory:
@@ -369,7 +367,6 @@ def generate(out_dir: Path, cli: Path | None, lib: Path | None) -> dict:
         notes="200 small files for listing and the filter field.",
         expect_paths=["batch/item-000.txt", "batch/item-199.txt"],
         expect_files={"batch/item-000.txt": "0\n"},
-        skip_full_extract_check=True,
     )
     z.write(p)
 
@@ -516,7 +513,6 @@ def generate(out_dir: Path, cli: Path | None, lib: Path | None) -> dict:
         notes="Regular file plus a symlink. Listing should show both.",
         expect_paths=["target.txt"],
         expect_files={"target.txt": "target\n"},
-        skip_extract=False,
     )
     make_tar(p, [("target.txt", b"target\n")], symlink=("link-to-target", "target.txt"))
 

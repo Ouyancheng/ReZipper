@@ -26,6 +26,7 @@ static NSString * const RZColMethod = @"method";
 @property (nonatomic, strong) RZProgressController *progressController;
 @property (nonatomic, strong) RZInfoController *infoController;
 @property (nonatomic, assign) BOOL busy;
+- (NSString *)askPassword:(NSString *)message;
 @end
 
 @implementation RZMainWindowController
@@ -310,16 +311,23 @@ static NSString * const RZColMethod = @"method";
     [self reloadBrowser];
 }
 
+- (NSString *)askPassword:(NSString *)message {
+    RZPasswordController *sheet = [[RZPasswordController alloc] init];
+    NSModalResponse response = [sheet runSheetForWindow:self.window message:message];
+    if (response != NSModalResponseOK || sheet.password.length == 0) {
+        return nil;
+    }
+    return sheet.password;
+}
+
 - (void)unlockIfNeeded {
     RZDocument *doc = self.archiveDocument;
     while (doc.needsPassword) {
-        RZPasswordController *sheet = [[RZPasswordController alloc] init];
-        NSModalResponse response = [sheet runSheetForWindow:self.window
-                                                    message:@"This archive is encrypted. Enter the password to open it."];
-        if (response != NSModalResponseOK || sheet.password.length == 0) {
+        NSString *password = [self askPassword:@"This archive is encrypted. Enter the password to open it."];
+        if (password.length == 0) {
             break;
         }
-        doc.password = sheet.password;
+        doc.password = password;
         NSError *error = nil;
         if ([doc reload:&error]) {
             doc.needsPassword = NO;
@@ -858,13 +866,11 @@ static NSString * const RZColMethod = @"method";
     if (!RZIsPasswordError(error)) {
         return NO;
     }
-    RZPasswordController *sheet = [[RZPasswordController alloc] init];
-    NSModalResponse response = [sheet runSheetForWindow:self.window
-                                                message:@"Enter the archive password to continue."];
-    if (response != NSModalResponseOK || sheet.password.length == 0) {
+    NSString *password = [self askPassword:@"Enter the archive password to continue."];
+    if (password.length == 0) {
         return NO;
     }
-    self.archiveDocument.password = sheet.password;
+    self.archiveDocument.password = password;
     return YES;
 }
 
@@ -1119,20 +1125,16 @@ static NSString * const RZColMethod = @"method";
         (void)progress;
         NSError *error = nil;
         if (![nested reload:&error]) {
-            if (RZIsPasswordError(error)) {
-                throw rz::EngineError(RZStd(error.localizedDescription), true);
-            }
             throw rz::EngineError(RZStd(error.localizedDescription.length
                                             ? error.localizedDescription
-                                            : @"Could not open nested archive"));
+                                            : @"Could not open nested archive"),
+                                  RZIsPasswordError(error));
         }
     } completion:^(NSError *error) {
         if (RZIsPasswordError(error)) {
-            RZPasswordController *sheet = [[RZPasswordController alloc] init];
-            NSModalResponse response = [sheet runSheetForWindow:self.window
-                                                        message:@"Enter the nested archive password to continue."];
-            if (response == NSModalResponseOK && sheet.password.length > 0) {
-                nested.password = sheet.password;
+            NSString *password = [self askPassword:@"Enter the nested archive password to continue."];
+            if (password.length) {
+                nested.password = password;
                 [self openNestedItem:item document:nested];
             }
             return;

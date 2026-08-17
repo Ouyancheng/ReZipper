@@ -63,17 +63,8 @@ int main(int argc, char** argv) {
     rz::Engine::instance().setLibraryPath(lib);
     const std::string cmd = args[0];
     try {
-        if (cmd == "list" || cmd == "nest-list") {
-            if (cmd == "nest-list") {
-                if (args.size() < 3) {
-                    usage();
-                    return 2;
-                }
-                nest = parseNest(args[2]);
-                if (password.empty() && args.size() > 3) {
-                    password = args[3];
-                }
-            } else if (password.empty() && args.size() > 2) {
+        if (cmd == "list") {
+            if (password.empty() && args.size() > 2) {
                 password = args[2];
             }
             const auto info = rz::Engine::instance().list(args[1], nest, password);

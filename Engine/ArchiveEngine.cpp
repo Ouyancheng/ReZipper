@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -43,9 +44,11 @@ bool isPasswordFailure(const BitException& ex) {
     if (ex.code() == BitFailureSource::WrongPassword) {
         return true;
     }
-    const std::string message = ex.what();
-    return message.find("password") != std::string::npos ||
-           message.find("Password") != std::string::npos;
+    std::string message = ex.what();
+    for (char& ch : message) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return message.find("password") != std::string::npos;
 }
 
 [[noreturn]] void rethrow(const BitException& ex) {
@@ -181,60 +184,10 @@ struct ZipCdName {
     bool utf8 = false;
 };
 
-std::vector<ZipCdName> parseZipCentralNames(const char* data, uint64_t fileSize) {
-    if (!data || fileSize < 22) {
+std::vector<ZipCdName> parseZipCdRecords(const char* cd, uint64_t cdSize, uint64_t nent) {
+    if (!cd || nent == 0 || cdSize == 0) {
         return {};
     }
-
-    const uint64_t scan = std::min<uint64_t>(fileSize, 65557);
-    const char* tail = data + (fileSize - scan);
-    int eocd = -1;
-    for (int i = static_cast<int>(scan) - 22; i >= 0; --i) {
-        if (tail[i] == 'P' && tail[i + 1] == 'K' &&
-            static_cast<unsigned char>(tail[i + 2]) == 5 &&
-            static_cast<unsigned char>(tail[i + 3]) == 6) {
-            eocd = i;
-            break;
-        }
-    }
-    if (eocd < 0) {
-        return {};
-    }
-
-    const char* e = tail + eocd;
-    uint64_t nent = rz_u16(e + 10);
-    uint64_t cdSize = rz_u32(e + 12);
-    uint64_t cdOff = rz_u32(e + 16);
-    if (nent == 0xffff || cdSize == 0xffffffffu || cdOff == 0xffffffffu) {
-        int loc = -1;
-        for (int i = eocd - 20; i >= 0; --i) {
-            if (tail[i] == 'P' && tail[i + 1] == 'K' &&
-                static_cast<unsigned char>(tail[i + 2]) == 6 &&
-                static_cast<unsigned char>(tail[i + 3]) == 7) {
-                loc = i;
-                break;
-            }
-        }
-        if (loc < 0) {
-            return {};
-        }
-        const uint64_t zip64Off = rz_u64(tail + loc + 8);
-        if (zip64Off + 56 > fileSize) {
-            return {};
-        }
-        const char* z64 = data + zip64Off;
-        if (z64[0] != 'P' || z64[1] != 'K') {
-            return {};
-        }
-        nent = rz_u64(z64 + 32);
-        cdSize = rz_u64(z64 + 40);
-        cdOff = rz_u64(z64 + 48);
-    }
-    if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
-        return {};
-    }
-
-    const char* cd = data + cdOff;
     std::vector<ZipCdName> names;
     names.reserve(static_cast<size_t>(nent));
     size_t pos = 0;
@@ -260,6 +213,73 @@ std::vector<ZipCdName> parseZipCentralNames(const char* data, uint64_t fileSize)
     return names;
 }
 
+bool findZipEocd(const char* tail, uint64_t scan, uint64_t& nent, uint64_t& cdSize, uint64_t& cdOff,
+                 uint64_t& zip64Off) {
+    int eocd = -1;
+    for (int i = static_cast<int>(scan) - 22; i >= 0; --i) {
+        if (tail[i] == 'P' && tail[i + 1] == 'K' &&
+            static_cast<unsigned char>(tail[i + 2]) == 5 &&
+            static_cast<unsigned char>(tail[i + 3]) == 6) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd < 0) {
+        return false;
+    }
+    const char* e = tail + eocd;
+    nent = rz_u16(e + 10);
+    cdSize = rz_u32(e + 12);
+    cdOff = rz_u32(e + 16);
+    zip64Off = UINT64_MAX;
+    if (nent != 0xffff && cdSize != 0xffffffffu && cdOff != 0xffffffffu) {
+        return true;
+    }
+    for (int i = eocd - 20; i >= 0; --i) {
+        if (tail[i] == 'P' && tail[i + 1] == 'K' &&
+            static_cast<unsigned char>(tail[i + 2]) == 6 &&
+            static_cast<unsigned char>(tail[i + 3]) == 7) {
+            zip64Off = rz_u64(tail + i + 8);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool applyZip64Eocd(const char* z64, uint64_t& nent, uint64_t& cdSize, uint64_t& cdOff) {
+    if (!z64 || z64[0] != 'P' || z64[1] != 'K') {
+        return false;
+    }
+    nent = rz_u64(z64 + 32);
+    cdSize = rz_u64(z64 + 40);
+    cdOff = rz_u64(z64 + 48);
+    return true;
+}
+
+std::vector<ZipCdName> parseZipCentralNames(const char* data, uint64_t fileSize) {
+    if (!data || fileSize < 22) {
+        return {};
+    }
+
+    const uint64_t scan = std::min<uint64_t>(fileSize, 65557);
+    uint64_t nent = 0;
+    uint64_t cdSize = 0;
+    uint64_t cdOff = 0;
+    uint64_t zip64Off = UINT64_MAX;
+    if (!findZipEocd(data + (fileSize - scan), scan, nent, cdSize, cdOff, zip64Off)) {
+        return {};
+    }
+    if (zip64Off != UINT64_MAX) {
+        if (zip64Off + 56 > fileSize || !applyZip64Eocd(data + zip64Off, nent, cdSize, cdOff)) {
+            return {};
+        }
+    }
+    if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
+        return {};
+    }
+    return parseZipCdRecords(data + cdOff, cdSize, nent);
+}
+
 std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -267,16 +287,46 @@ std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
     }
     file.seekg(0, std::ios::end);
     const auto fileSize = static_cast<uint64_t>(file.tellg());
-    if (fileSize < 22 || fileSize > 512ull * 1024 * 1024) {
+    if (fileSize < 22) {
         return {};
     }
-    std::vector<char> data(static_cast<size_t>(fileSize));
-    file.seekg(0);
-    file.read(data.data(), static_cast<std::streamsize>(fileSize));
-    if (file.gcount() != static_cast<std::streamsize>(fileSize)) {
+
+    const uint64_t scan = std::min<uint64_t>(fileSize, 65557);
+    std::vector<char> tail(scan);
+    file.seekg(static_cast<std::streamoff>(fileSize - scan));
+    file.read(tail.data(), static_cast<std::streamsize>(scan));
+    if (file.gcount() != static_cast<std::streamsize>(scan)) {
         return {};
     }
-    return parseZipCentralNames(data.data(), fileSize);
+
+    uint64_t nent = 0;
+    uint64_t cdSize = 0;
+    uint64_t cdOff = 0;
+    uint64_t zip64Off = UINT64_MAX;
+    if (!findZipEocd(tail.data(), scan, nent, cdSize, cdOff, zip64Off)) {
+        return {};
+    }
+    if (zip64Off != UINT64_MAX) {
+        std::vector<char> z64(56);
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(zip64Off));
+        file.read(z64.data(), 56);
+        if (file.gcount() < 56 || !applyZip64Eocd(z64.data(), nent, cdSize, cdOff)) {
+            return {};
+        }
+    }
+    if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
+        return {};
+    }
+
+    std::vector<char> cd(static_cast<size_t>(cdSize));
+    file.clear();
+    file.seekg(static_cast<std::streamoff>(cdOff));
+    file.read(cd.data(), static_cast<std::streamsize>(cdSize));
+    if (file.gcount() != static_cast<std::streamsize>(cdSize)) {
+        return {};
+    }
+    return parseZipCdRecords(cd.data(), cdSize, nent);
 }
 
 bool isValidUtf8(const std::string& text) {
@@ -660,6 +710,20 @@ ArchiveInfo fillInfo(BitArchiveReader& reader, const std::string& path, bool can
     return info;
 }
 
+void remapZipNames(ArchiveInfo& info, const std::unordered_map<std::uint32_t, std::string>& names) {
+    if (info.format == Format::Zip) {
+        applyZipNames(info.items, names);
+    }
+}
+
+template <typename Source>
+std::unordered_map<std::uint32_t, std::string> zipNamesIfZip(BitArchiveReader& reader, const Source& source) {
+    if (formatFromBit(reader.detectedFormat()) != Format::Zip) {
+        return {};
+    }
+    return zipDecodedPaths(source);
+}
+
 // Pull each nested item into memory so the inner archive can be opened
 // without writing it to disk (zip-in-zip, tar inside gz, etc.).
 buffer_t peelNested(const Bit7zLibrary& lib,
@@ -712,17 +776,13 @@ ArchiveInfo Engine::list(const std::string& archivePath,
         if (nestIndices.empty()) {
             BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
             ArchiveInfo info = fillInfo(reader, archivePath, true);
-            if (info.format == Format::Zip) {
-                applyZipNames(info.items, zipDecodedPaths(archivePath));
-            }
+            remapZipNames(info, zipDecodedPaths(archivePath));
             return info;
         }
         const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
         BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
         ArchiveInfo info = fillInfo(reader, archivePath, false);
-        if (info.format == Format::Zip) {
-            applyZipNames(info.items, zipDecodedPaths(blob));
-        }
+        remapZipNames(info, zipDecodedPaths(blob));
         return info;
     } catch (const BitException& ex) {
         rethrow(ex);
@@ -759,19 +819,13 @@ void Engine::extract(const std::string& archivePath,
             BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
             reader.setOverwriteMode(OverwriteMode::Overwrite);
             attachProgress(reader, progress);
-            const auto zipNames = (formatFromBit(reader.detectedFormat()) == Format::Zip)
-                                      ? zipDecodedPaths(blob)
-                                      : std::unordered_map<std::uint32_t, std::string>{};
-            extractMapped(reader, zipNames);
+            extractMapped(reader, zipNamesIfZip(reader, blob));
             return;
         }
         BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
         reader.setOverwriteMode(OverwriteMode::Overwrite);
         attachProgress(reader, progress);
-        const auto zipNames = (formatFromBit(reader.detectedFormat()) == Format::Zip)
-                                  ? zipDecodedPaths(archivePath)
-                                  : std::unordered_map<std::uint32_t, std::string>{};
-        extractMapped(reader, zipNames);
+        extractMapped(reader, zipNamesIfZip(reader, archivePath));
     } catch (const BitException& ex) {
         rethrow(ex);
     }

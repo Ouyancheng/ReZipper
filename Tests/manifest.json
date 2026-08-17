@@ -154,8 +154,7 @@
       ],
       "expect_files": {
         "batch/item-000.txt": "0\n"
-      },
-      "skip_full_extract_check": true
+      }
     },
     "15-nested.zip": {
       "file": "15-nested.zip",
