@@ -884,7 +884,15 @@ static NSString * const RZColMethod = @"method";
         progress->cancel.store(true);
     };
     self.progressController = controller;
-    [self.window beginSheet:controller.window completionHandler:nil];
+    __block NSError *workError = nil;
+    [self.window beginSheet:controller.window completionHandler:^(NSModalResponse result) {
+        (void)result;
+        self.progressController = nil;
+        self.busy = NO;
+        if (completion) {
+            completion(workError);
+        }
+    }];
 
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.15 repeats:YES block:^(NSTimer *t) {
         (void)t;
@@ -908,12 +916,8 @@ static NSString * const RZColMethod = @"method";
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             [timer invalidate];
+            workError = error;
             [self.window endSheet:controller.window];
-            self.progressController = nil;
-            self.busy = NO;
-            if (completion) {
-                completion(error);
-            }
         });
     });
 }

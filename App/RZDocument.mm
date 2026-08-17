@@ -234,11 +234,51 @@
 
 - (NSArray<RZItem *> *)itemsInFolder:(NSString *)folderPath {
     NSMutableArray<RZItem *> *result = [NSMutableArray array];
+    NSMutableSet<NSString *> *dirs = [NSMutableSet set];
     for (RZItem *item in self.items) {
         if ([[item parentPath] isEqualToString:folderPath]) {
             [result addObject:item];
+            if (item.isDir) {
+                [dirs addObject:item.path];
+            }
         }
     }
+
+    // Zips often store "folder/file.txt" without a "folder/" directory entry.
+    // Synthesize those folders so the table can open them like the sidebar.
+    NSString *prefix = folderPath.length ? [folderPath stringByAppendingString:@"/"] : @"";
+    for (RZItem *item in self.items) {
+        NSString *path = item.path;
+        if (prefix.length) {
+            if (![path hasPrefix:prefix] || path.length <= prefix.length) {
+                continue;
+            }
+        } else if (![path containsString:@"/"]) {
+            continue;
+        }
+        NSString *rest = prefix.length ? [path substringFromIndex:prefix.length] : path;
+        NSRange slash = [rest rangeOfString:@"/"];
+        if (slash.location == NSNotFound) {
+            continue;
+        }
+        NSString *name = [rest substringToIndex:slash.location];
+        if (name.length == 0) {
+            continue;
+        }
+        NSString *childPath = prefix.length ? [prefix stringByAppendingString:name] : name;
+        if ([dirs containsObject:childPath]) {
+            continue;
+        }
+        [dirs addObject:childPath];
+        RZItem *folder = [[RZItem alloc] init];
+        folder.isDir = YES;
+        folder.isVirtual = YES;
+        folder.name = name;
+        folder.path = childPath;
+        folder.method = @"";
+        [result addObject:folder];
+    }
+
     [result sortUsingComparator:^NSComparisonResult(RZItem *lhs, RZItem *rhs) {
         if (lhs.isDir != rhs.isDir) {
             return lhs.isDir ? NSOrderedAscending : NSOrderedDescending;
@@ -251,7 +291,9 @@
 - (NSArray<NSNumber *> *)indicesForItems:(NSArray<RZItem *> *)items includeChildren:(BOOL)includeChildren {
     NSMutableIndexSet *set = [NSMutableIndexSet indexSet];
     for (RZItem *item in items) {
-        [set addIndex:item.index];
+        if (!item.isVirtual) {
+            [set addIndex:item.index];
+        }
         if (includeChildren && item.isDir) {
             NSString *prefix = item.path.length ? [item.path stringByAppendingString:@"/"] : @"";
             for (RZItem *candidate in self.items) {

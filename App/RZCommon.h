@@ -39,6 +39,7 @@ static inline BOOL RZIsPasswordError(NSError * _Nullable error) {
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *method;
 @property (nonatomic, assign) BOOL isDir;
+@property (nonatomic, assign) BOOL isVirtual;
 @property (nonatomic, assign) BOOL encrypted;
 @property (nonatomic, assign) std::uint64_t size;
 @property (nonatomic, assign) std::uint64_t packedSize;

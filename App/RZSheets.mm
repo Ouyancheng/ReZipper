@@ -2,10 +2,9 @@
 #import "RZDocument.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-static void RZApplyGlassButton(NSButton *button) {
-    if (@available(macOS 26.0, *)) {
-        button.bezelStyle = NSBezelStyleGlass;
-    }
+static void RZApplyDialogButton(NSButton *button) {
+    button.bezelStyle = NSBezelStyleRounded;
+    button.controlSize = NSControlSizeRegular;
 }
 
 #pragma mark - Progress
@@ -47,7 +46,7 @@ static void RZApplyGlassButton(NSButton *button) {
     NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancel:)];
     cancel.keyEquivalent = @"\033";
     cancel.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyGlassButton(cancel);
+    RZApplyDialogButton(cancel);
 
     [content addSubview:title];
     [content addSubview:status];
@@ -109,89 +108,52 @@ static void RZApplyGlassButton(NSButton *button) {
 #pragma mark - Password
 
 @interface RZPasswordController ()
-@property (nonatomic, strong) NSTextField *messageField;
-@property (nonatomic, strong) NSSecureTextField *field;
 @property (nonatomic, copy, readwrite) NSString *password;
 @end
 
 @implementation RZPasswordController
 
 - (instancetype)init {
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 380, 150)
-                                                   styleMask:NSWindowStyleMaskTitled
-                                                     backing:NSBackingStoreBuffered
-                                                       defer:YES];
-    window.title = @"Password";
-    self = [super initWithWindow:window];
-    if (!self) {
-        return nil;
+    self = [super initWithWindow:nil];
+    if (self) {
+        _password = @"";
     }
-
-    NSView *content = window.contentView;
-    NSTextField *message = [NSTextField wrappingLabelWithString:@"This archive is encrypted."];
-    message.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
-    field.translatesAutoresizingMaskIntoConstraints = NO;
-    field.placeholderString = @"Password";
-
-    NSButton *ok = [NSButton buttonWithTitle:@"OK" target:self action:@selector(ok:)];
-    ok.keyEquivalent = @"\r";
-    ok.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyGlassButton(ok);
-    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancel:)];
-    cancel.keyEquivalent = @"\033";
-    cancel.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyGlassButton(cancel);
-
-    [content addSubview:message];
-    [content addSubview:field];
-    [content addSubview:ok];
-    [content addSubview:cancel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [message.topAnchor constraintEqualToAnchor:content.topAnchor constant:16],
-        [message.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
-        [message.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-20],
-        [field.topAnchor constraintEqualToAnchor:message.bottomAnchor constant:12],
-        [field.leadingAnchor constraintEqualToAnchor:message.leadingAnchor],
-        [field.trailingAnchor constraintEqualToAnchor:message.trailingAnchor],
-        [field.heightAnchor constraintEqualToConstant:22],
-        [ok.topAnchor constraintEqualToAnchor:field.bottomAnchor constant:16],
-        [ok.trailingAnchor constraintEqualToAnchor:message.trailingAnchor],
-        [cancel.centerYAnchor constraintEqualToAnchor:ok.centerYAnchor],
-        [cancel.trailingAnchor constraintEqualToAnchor:ok.leadingAnchor constant:-8],
-        [ok.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-16],
-    ]];
-
-    self.messageField = message;
-    self.field = field;
-    self.password = @"";
     return self;
 }
 
 - (NSModalResponse)runSheetForWindow:(NSWindow *)window message:(NSString *)message {
-    self.messageField.stringValue = message;
-    self.field.stringValue = @"";
-    __block NSModalResponse response = NSModalResponseCancel;
-    [window beginSheet:self.window completionHandler:^(NSModalResponse result) {
-        response = result;
-        [NSApp stopModalWithCode:result];
-    }];
-    [NSApp runModalForWindow:self.window];
-    return response;
-}
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Password";
+    alert.informativeText = message.length ? message : @"This archive is encrypted.";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleInformational;
 
-- (void)ok:(id)sender {
-    (void)sender;
-    self.password = self.field.stringValue ?: @"";
-    [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseOK];
-}
+    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    field.placeholderString = @"Password";
+    field.stringValue = @"";
+    alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
 
-- (void)cancel:(id)sender {
-    (void)sender;
+    NSModalResponse result = NSAlertSecondButtonReturn;
+    if (window.visible && window.attachedSheet == nil) {
+        __block NSModalResponse sheetResult = NSAlertSecondButtonReturn;
+        [alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse returnCode) {
+            sheetResult = returnCode;
+            [NSApp stopModal];
+        }];
+        [NSApp runModalForWindow:window];
+        result = sheetResult;
+    } else {
+        result = [alert runModal];
+    }
+
+    if (result == NSAlertFirstButtonReturn) {
+        self.password = field.stringValue ?: @"";
+        return NSModalResponseOK;
+    }
     self.password = @"";
-    [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseCancel];
+    return NSModalResponseCancel;
 }
 
 @end
@@ -223,7 +185,7 @@ static void RZApplyGlassButton(NSButton *button) {
     NSButton *done = [NSButton buttonWithTitle:@"Done" target:self action:@selector(dismiss:)];
     done.keyEquivalent = @"\r";
     done.translatesAutoresizingMaskIntoConstraints = NO;
-    RZApplyGlassButton(done);
+    RZApplyDialogButton(done);
 
     [window.contentView addSubview:body];
     [window.contentView addSubview:done];

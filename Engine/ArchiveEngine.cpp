@@ -40,7 +40,12 @@ Bit7zLibrary& library(const std::string& path) {
 }
 
 bool isPasswordFailure(const BitException& ex) {
-    return ex.code() == BitFailureSource::WrongPassword;
+    if (ex.code() == BitFailureSource::WrongPassword) {
+        return true;
+    }
+    const std::string message = ex.what();
+    return message.find("password") != std::string::npos ||
+           message.find("Password") != std::string::npos;
 }
 
 [[noreturn]] void rethrow(const BitException& ex) {
@@ -176,30 +181,18 @@ struct ZipCdName {
     bool utf8 = false;
 };
 
-std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return {};
-    }
-    file.seekg(0, std::ios::end);
-    const auto fileSize = static_cast<uint64_t>(file.tellg());
-    if (fileSize < 22) {
+std::vector<ZipCdName> parseZipCentralNames(const char* data, uint64_t fileSize) {
+    if (!data || fileSize < 22) {
         return {};
     }
 
     const uint64_t scan = std::min<uint64_t>(fileSize, 65557);
-    std::vector<char> tail(scan);
-    file.seekg(static_cast<std::streamoff>(fileSize - scan));
-    file.read(tail.data(), static_cast<std::streamsize>(scan));
-    if (file.gcount() != static_cast<std::streamsize>(scan)) {
-        return {};
-    }
-
+    const char* tail = data + (fileSize - scan);
     int eocd = -1;
     for (int i = static_cast<int>(scan) - 22; i >= 0; --i) {
-        if (tail[static_cast<size_t>(i)] == 'P' && tail[static_cast<size_t>(i) + 1] == 'K' &&
-            static_cast<unsigned char>(tail[static_cast<size_t>(i) + 2]) == 5 &&
-            static_cast<unsigned char>(tail[static_cast<size_t>(i) + 3]) == 6) {
+        if (tail[i] == 'P' && tail[i + 1] == 'K' &&
+            static_cast<unsigned char>(tail[i + 2]) == 5 &&
+            static_cast<unsigned char>(tail[i + 3]) == 6) {
             eocd = i;
             break;
         }
@@ -208,16 +201,16 @@ std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
         return {};
     }
 
-    const char* e = tail.data() + eocd;
+    const char* e = tail + eocd;
     uint64_t nent = rz_u16(e + 10);
     uint64_t cdSize = rz_u32(e + 12);
     uint64_t cdOff = rz_u32(e + 16);
     if (nent == 0xffff || cdSize == 0xffffffffu || cdOff == 0xffffffffu) {
         int loc = -1;
         for (int i = eocd - 20; i >= 0; --i) {
-            if (tail[static_cast<size_t>(i)] == 'P' && tail[static_cast<size_t>(i) + 1] == 'K' &&
-                static_cast<unsigned char>(tail[static_cast<size_t>(i) + 2]) == 6 &&
-                static_cast<unsigned char>(tail[static_cast<size_t>(i) + 3]) == 7) {
+            if (tail[i] == 'P' && tail[i + 1] == 'K' &&
+                static_cast<unsigned char>(tail[i + 2]) == 6 &&
+                static_cast<unsigned char>(tail[i + 3]) == 7) {
                 loc = i;
                 break;
             }
@@ -225,53 +218,65 @@ std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
         if (loc < 0) {
             return {};
         }
-        const uint64_t zip64Off = rz_u64(tail.data() + loc + 8);
-        std::vector<char> z64(56);
-        file.clear();
-        file.seekg(static_cast<std::streamoff>(zip64Off));
-        file.read(z64.data(), 56);
-        if (file.gcount() < 56 || z64[0] != 'P' || z64[1] != 'K') {
+        const uint64_t zip64Off = rz_u64(tail + loc + 8);
+        if (zip64Off + 56 > fileSize) {
             return {};
         }
-        nent = rz_u64(z64.data() + 32);
-        cdSize = rz_u64(z64.data() + 40);
-        cdOff = rz_u64(z64.data() + 48);
+        const char* z64 = data + zip64Off;
+        if (z64[0] != 'P' || z64[1] != 'K') {
+            return {};
+        }
+        nent = rz_u64(z64 + 32);
+        cdSize = rz_u64(z64 + 40);
+        cdOff = rz_u64(z64 + 48);
     }
     if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
         return {};
     }
 
-    std::vector<char> cd(cdSize);
-    file.clear();
-    file.seekg(static_cast<std::streamoff>(cdOff));
-    file.read(cd.data(), static_cast<std::streamsize>(cdSize));
-    if (file.gcount() != static_cast<std::streamsize>(cdSize)) {
-        return {};
-    }
-
+    const char* cd = data + cdOff;
     std::vector<ZipCdName> names;
     names.reserve(static_cast<size_t>(nent));
     size_t pos = 0;
-    while (pos + 46 <= cd.size() && names.size() < nent) {
+    while (pos + 46 <= cdSize && names.size() < nent) {
         if (cd[pos] != 'P' || cd[pos + 1] != 'K' ||
             static_cast<unsigned char>(cd[pos + 2]) != 1 ||
             static_cast<unsigned char>(cd[pos + 3]) != 2) {
             break;
         }
-        const uint16_t flags = rz_u16(cd.data() + pos + 8);
-        const uint16_t nameLen = rz_u16(cd.data() + pos + 28);
-        const uint16_t extraLen = rz_u16(cd.data() + pos + 30);
-        const uint16_t commentLen = rz_u16(cd.data() + pos + 32);
-        if (pos + 46 + nameLen + extraLen + commentLen > cd.size()) {
+        const uint16_t flags = rz_u16(cd + pos + 8);
+        const uint16_t nameLen = rz_u16(cd + pos + 28);
+        const uint16_t extraLen = rz_u16(cd + pos + 30);
+        const uint16_t commentLen = rz_u16(cd + pos + 32);
+        if (pos + 46 + nameLen + extraLen + commentLen > cdSize) {
             break;
         }
         ZipCdName entry;
-        entry.raw.assign(cd.data() + pos + 46, nameLen);
+        entry.raw.assign(cd + pos + 46, nameLen);
         entry.utf8 = (flags & 0x800) != 0;
         names.push_back(std::move(entry));
         pos += 46 + nameLen + extraLen + commentLen;
     }
     return names;
+}
+
+std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return {};
+    }
+    file.seekg(0, std::ios::end);
+    const auto fileSize = static_cast<uint64_t>(file.tellg());
+    if (fileSize < 22 || fileSize > 512ull * 1024 * 1024) {
+        return {};
+    }
+    std::vector<char> data(static_cast<size_t>(fileSize));
+    file.seekg(0);
+    file.read(data.data(), static_cast<std::streamsize>(fileSize));
+    if (file.gcount() != static_cast<std::streamsize>(fileSize)) {
+        return {};
+    }
+    return parseZipCentralNames(data.data(), fileSize);
 }
 
 bool isValidUtf8(const std::string& text) {
@@ -325,17 +330,29 @@ std::optional<std::string> iconvToUtf8(const std::string& input, const char* fro
     return output;
 }
 
-int scoreUtf8Text(const std::string& text) {
-    int score = 0;
+struct ScriptCounts {
+    int ascii = 0;
+    int han = 0;
+    int hira = 0;
+    int kata = 0;
+    int hang = 0;
+    int jamo = 0;
+    int halfKata = 0;
+    int other = 0;
+    bool valid = true;
+};
+
+ScriptCounts countScripts(const std::string& text) {
+    ScriptCounts counts;
     const auto* p = reinterpret_cast<const unsigned char*>(text.data());
     const auto* end = p + text.size();
     while (p < end) {
         if (*p <= 0x7F) {
             if (*p < 0x20 && *p != '\t') {
-                score -= 8;
-            } else {
-                score += 1;
+                counts.valid = false;
+                return counts;
             }
+            counts.ascii += 1;
             ++p;
             continue;
         }
@@ -351,24 +368,80 @@ int scoreUtf8Text(const std::string& text) {
             extra = 3;
             cp = *p & 0x07;
         } else {
-            return -100000;
+            counts.valid = false;
+            return counts;
         }
         if (p + extra >= end) {
-            return -100000;
+            counts.valid = false;
+            return counts;
         }
         for (int i = 1; i <= extra; ++i) {
+            if ((p[i] & 0xC0) != 0x80) {
+                counts.valid = false;
+                return counts;
+            }
             cp = (cp << 6) | (p[i] & 0x3F);
         }
         p += extra + 1;
         if (cp == 0xFFFD) {
-            score -= 50;
-        } else if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) ||
-                   (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0xAC00 && cp <= 0xD7AF) ||
-                   (cp >= 0xFF00 && cp <= 0xFFEF)) {
-            score += 8;
-        } else {
-            score += 2;
+            counts.valid = false;
+            return counts;
         }
+        if (cp >= 0xFF61 && cp <= 0xFF9F) {
+            counts.halfKata += 1;
+        } else if (cp >= 0x3040 && cp <= 0x309F) {
+            counts.hira += 1;
+        } else if (cp >= 0x30A0 && cp <= 0x30FF) {
+            counts.kata += 1;
+        } else if (cp >= 0xAC00 && cp <= 0xD7AF) {
+            counts.hang += 1;
+        } else if ((cp >= 0x3130 && cp <= 0x318F) || (cp >= 0x1100 && cp <= 0x11FF)) {
+            counts.jamo += 1;
+        } else if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF)) {
+            counts.han += 1;
+        } else {
+            counts.other += 1;
+        }
+    }
+    return counts;
+}
+
+int scoreDecodedForEncoding(const char* enc, const ScriptCounts& counts) {
+    if (!counts.valid) {
+        return -100000;
+    }
+    const bool sjis = std::strcmp(enc, "SHIFT_JIS") == 0 || std::strcmp(enc, "CP932") == 0;
+    const bool korean = std::strcmp(enc, "EUC-KR") == 0;
+    const bool gb = std::strcmp(enc, "GB18030") == 0 || std::strcmp(enc, "GBK") == 0;
+    const bool big5 = std::strcmp(enc, "BIG5") == 0;
+
+    int score = counts.ascii + counts.other;
+    score -= counts.halfKata * 12;
+
+    if (sjis) {
+        score += (counts.hira + counts.kata) * 24;
+        score += counts.han * 2;
+        if (counts.hira + counts.kata == 0) {
+            score -= 16;
+        }
+        score -= counts.hang * 20;
+    } else if (korean) {
+        score += counts.hang * 24;
+        score -= counts.jamo * 20;
+        score -= counts.han * 25;
+        const int cjk = counts.hang + counts.han + counts.hira + counts.kata + counts.jamo;
+        // Real Korean names are almost all Hangul. GBK/Big5 misreads are mixed.
+        if (cjk > 0 && counts.hang * 5 < cjk * 4) {
+            score -= 80;
+        }
+        if (counts.hang == 0) {
+            score -= 40;
+        }
+        score -= (counts.hira + counts.kata) * 20;
+    } else if (gb || big5) {
+        score += counts.han * 6;
+        score -= (counts.hira + counts.kata) * 20;
+        score -= counts.hang * 20;
     }
     return score;
 }
@@ -431,13 +504,15 @@ const char* detectLegacyEncoding(const std::vector<std::string>& rawNames) {
                 ok = false;
                 break;
             }
-            score += scoreUtf8Text(*decoded);
+            score += scoreDecodedForEncoding(enc, countScripts(*decoded));
         }
         if (!ok) {
             continue;
         }
+        // Locale is only a tie-breaker. Script evidence must win for
+        // Japanese / Korean zips opened under a Chinese locale.
         if (preferred && std::strcmp(enc, preferred) == 0) {
-            score += 40;
+            score += 5;
         }
         if (score > bestScore) {
             bestScore = score;
@@ -447,8 +522,8 @@ const char* detectLegacyEncoding(const std::vector<std::string>& rawNames) {
     return best;
 }
 
-std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const std::string& archivePath) {
-    const auto entries = readZipCentralNames(archivePath);
+std::unordered_map<std::uint32_t, std::string> zipDecodedPathsFromEntries(
+    const std::vector<ZipCdName>& entries) {
     if (entries.empty()) {
         return {};
     }
@@ -459,17 +534,13 @@ std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const std::string
         }
     }
     const char* encoding = detectLegacyEncoding(legacy);
-    if (!encoding) {
-        return {};
-    }
-
     std::unordered_map<std::uint32_t, std::string> names;
     for (std::uint32_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
         std::optional<std::string> decoded;
         if (entry.utf8 || isValidUtf8(entry.raw)) {
             decoded = entry.raw;
-        } else {
+        } else if (encoding) {
             decoded = iconvToUtf8(entry.raw, encoding);
         }
         if (!decoded || decoded->empty()) {
@@ -478,6 +549,18 @@ std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const std::string
         names[i] = posixPath(*decoded);
     }
     return names;
+}
+
+std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const std::string& archivePath) {
+    return zipDecodedPathsFromEntries(readZipCentralNames(archivePath));
+}
+
+std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const buffer_t& blob) {
+    if (blob.empty()) {
+        return {};
+    }
+    return zipDecodedPathsFromEntries(parseZipCentralNames(
+        reinterpret_cast<const char*>(blob.data()), blob.size()));
 }
 
 void applyZipNames(std::vector<Item>& items, const std::unordered_map<std::uint32_t, std::string>& names) {
@@ -636,7 +719,11 @@ ArchiveInfo Engine::list(const std::string& archivePath,
         }
         const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
         BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
-        return fillInfo(reader, archivePath, false);
+        ArchiveInfo info = fillInfo(reader, archivePath, false);
+        if (info.format == Format::Zip) {
+            applyZipNames(info.items, zipDecodedPaths(blob));
+        }
+        return info;
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -652,16 +739,30 @@ void Engine::extract(const std::string& archivePath,
     try {
         auto& lib = library(libraryPath_);
         fs::create_directories(destination);
+        auto extractMapped = [&](BitArchiveReader& reader,
+                                 const std::unordered_map<std::uint32_t, std::string>& zipNames) {
+            std::unordered_set<std::uint32_t> wanted(indices.begin(), indices.end());
+            reader.extractTo(destination, [&](const BitArchiveItem& item) -> tstring {
+                if (!wanted.empty() && wanted.find(item.index()) == wanted.end()) {
+                    return {};
+                }
+                const auto it = zipNames.find(item.index());
+                const std::string path = it != zipNames.end() ? it->second : posixPath(item.path());
+                if (path.empty()) {
+                    return {};
+                }
+                return path;
+            });
+        };
         if (!nestIndices.empty()) {
             const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
             BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
             reader.setOverwriteMode(OverwriteMode::Overwrite);
             attachProgress(reader, progress);
-            if (indices.empty()) {
-                reader.extractTo(destination);
-            } else {
-                reader.extractTo(destination, indices);
-            }
+            const auto zipNames = (formatFromBit(reader.detectedFormat()) == Format::Zip)
+                                      ? zipDecodedPaths(blob)
+                                      : std::unordered_map<std::uint32_t, std::string>{};
+            extractMapped(reader, zipNames);
             return;
         }
         BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
@@ -670,20 +771,7 @@ void Engine::extract(const std::string& archivePath,
         const auto zipNames = (formatFromBit(reader.detectedFormat()) == Format::Zip)
                                   ? zipDecodedPaths(archivePath)
                                   : std::unordered_map<std::uint32_t, std::string>{};
-        std::unordered_set<std::uint32_t> wanted(indices.begin(), indices.end());
-        if (!zipNames.empty()) {
-            reader.extractTo(destination, [&](const BitArchiveItem& item) -> tstring {
-                if (!wanted.empty() && wanted.find(item.index()) == wanted.end()) {
-                    return {};
-                }
-                const auto it = zipNames.find(item.index());
-                return it != zipNames.end() ? it->second : item.path();
-            });
-        } else if (indices.empty()) {
-            reader.extractTo(destination);
-        } else {
-            reader.extractTo(destination, indices);
-        }
+        extractMapped(reader, zipNames);
     } catch (const BitException& ex) {
         rethrow(ex);
     }

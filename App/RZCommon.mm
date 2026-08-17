@@ -59,7 +59,7 @@
     }
     RZFolderNode *child = [[RZFolderNode alloc] init];
     child.name = name;
-    child.path = self.path.length == 0 ? name : [self.path stringByAppendingPathComponent:name];
+    child.path = self.path.length == 0 ? name : [NSString stringWithFormat:@"%@/%@", self.path, name];
     [self.children addObject:child];
     return child;
 }

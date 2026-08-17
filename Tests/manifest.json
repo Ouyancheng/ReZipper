@@ -1,0 +1,430 @@
+{
+  "password": "secret",
+  "archives": {
+    "02-gbk-folders.zip": {
+      "file": "02-gbk-folders.zip",
+      "like": "01history.zip",
+      "notes": "GBK, no UTF-8 flag, trailing-slash directory entries. Root folder must appear.",
+      "expect_paths": [
+        "0-1刷新",
+        "0-1刷新/说明.txt",
+        "0-1刷新/OmniLang演示.pptx.txt",
+        "0-1刷新/子目录",
+        "0-1刷新/子目录/深层.txt"
+      ],
+      "expect_files": {
+        "0-1刷新/说明.txt": "历史文件夹应出现在根目录\n"
+      }
+    },
+    "03-gbk-implicit.zip": {
+      "file": "03-gbk-implicit.zip",
+      "notes": "GBK files with parent paths but no directory entries.",
+      "expect_paths": [
+        "资料/汉化/说明.txt",
+        "资料/汉化/存档.sav.txt"
+      ],
+      "expect_files": {
+        "资料/汉化/说明.txt": "implicit folders\n"
+      }
+    },
+    "04-shiftjis.zip": {
+      "file": "04-shiftjis.zip",
+      "notes": "Shift-JIS names, no UTF-8 flag.",
+      "expect_paths": [
+        "日本語フォルダ",
+        "日本語フォルダ/説明.txt"
+      ],
+      "expect_files": {
+        "日本語フォルダ/説明.txt": "シフトJIS\n"
+      }
+    },
+    "05-big5.zip": {
+      "file": "05-big5.zip",
+      "notes": "Big5 names, no UTF-8 flag.",
+      "expect_paths": [
+        "繁體中文",
+        "繁體中文/說明.txt"
+      ],
+      "expect_files": {
+        "繁體中文/說明.txt": "Big5 編碼\n"
+      }
+    },
+    "06-euckr.zip": {
+      "file": "06-euckr.zip",
+      "notes": "EUC-KR names, no UTF-8 flag.",
+      "expect_paths": [
+        "한글폴더",
+        "한글폴더/설명.txt"
+      ],
+      "expect_files": {
+        "한글폴더/설명.txt": "EUC-KR\n"
+      }
+    },
+    "07-utf8-flag.zip": {
+      "file": "07-utf8-flag.zip",
+      "notes": "Language encoding flag set; names are already UTF-8.",
+      "expect_paths": [
+        "中文文件夹",
+        "中文文件夹/你好.txt",
+        "中文文件夹/emoji-📦.txt"
+      ],
+      "expect_files": {
+        "中文文件夹/你好.txt": "utf-8 ok\n"
+      }
+    },
+    "08-special-names.zip": {
+      "file": "08-special-names.zip",
+      "notes": "Spaces, dots, #, %, brackets, quotes, NFC accent.",
+      "expect_paths": [
+        "file with spaces.txt",
+        ".hidden",
+        "dots...txt",
+        "name#hash%.txt",
+        "brackets[1].txt",
+        "quotes'n.txt",
+        "café.txt",
+        "trailing "
+      ],
+      "expect_files": {
+        "file with spaces.txt": "spaces\n",
+        "café.txt": "café\n"
+      }
+    },
+    "09-empty-zero.zip": {
+      "file": "09-empty-zero.zip",
+      "notes": "Empty directories and a zero-byte file.",
+      "expect_paths": [
+        "empty-dir",
+        "zero.txt",
+        "empty-dir/also-empty"
+      ],
+      "expect_files": {
+        "zero.txt": ""
+      }
+    },
+    "10-deep-tree.zip": {
+      "file": "10-deep-tree.zip",
+      "notes": "12-level folder plus root siblings for the path bar and sidebar.",
+      "expect_paths": [
+        "L01/L02/L03/L04/L05/L06/L07/L08/L09/L10/L11/L12",
+        "L01/L02/L03/L04/L05/L06/L07/L08/L09/L10/L11/L12/leaf.txt",
+        "sibling-00.txt",
+        "sibling-07.txt"
+      ],
+      "expect_files": {
+        "L01/L02/L03/L04/L05/L06/L07/L08/L09/L10/L11/L12/leaf.txt": "bottom\n"
+      }
+    },
+    "11-windows-backslash.zip": {
+      "file": "11-windows-backslash.zip",
+      "notes": "Central-directory name uses backslashes; engine should normalize to /.",
+      "expect_paths": [
+        "win/folder/readme.txt"
+      ],
+      "expect_files": {
+        "win/folder/readme.txt": "backslash\n"
+      }
+    },
+    "12-absolute-path.zip": {
+      "file": "12-absolute-path.zip",
+      "notes": "Stored as /absolute/rooted.txt; listing should drop the leading slash.",
+      "expect_paths": [
+        "absolute/rooted.txt"
+      ],
+      "expect_files": {
+        "absolute/rooted.txt": "rooted\n"
+      }
+    },
+    "13-long-name.zip": {
+      "file": "13-long-name.zip",
+      "notes": "~200-character UTF-8 filename.",
+      "expect_paths": [
+        "很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名.txt"
+      ],
+      "expect_files": {
+        "很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名.txt": "long\n"
+      }
+    },
+    "14-many-files.zip": {
+      "file": "14-many-files.zip",
+      "notes": "200 small files for listing and the filter field.",
+      "expect_paths": [
+        "batch/item-000.txt",
+        "batch/item-199.txt"
+      ],
+      "expect_files": {
+        "batch/item-000.txt": "0\n"
+      },
+      "skip_full_extract_check": true
+    },
+    "15-nested.zip": {
+      "file": "15-nested.zip",
+      "notes": "Zip-in-zip, zip-in-zip-in-zip, tgz, jar, and a fake .zip for fallback.",
+      "expect_paths": [
+        "inner.zip",
+        "mid.zip",
+        "bundle.tgz",
+        "payload.jar",
+        "not-really.zip",
+        "readme.txt"
+      ],
+      "expect_files": {
+        "readme.txt": "open the real archives in-app\n"
+      },
+      "nested": [
+        {
+          "path": "inner.zip",
+          "expect_paths": [
+            "hello.txt"
+          ],
+          "expect_files": {
+            "hello.txt": "nested-ok\n"
+          }
+        },
+        {
+          "path": "mid.zip",
+          "expect_paths": [
+            "inner.zip",
+            "note.txt"
+          ]
+        },
+        {
+          "path": "mid.zip",
+          "then": "inner.zip",
+          "expect_paths": [
+            "hello.txt"
+          ]
+        },
+        {
+          "path": "payload.jar",
+          "expect_paths": [
+            "META-INF/MANIFEST.MF",
+            "com/example/A.class.txt"
+          ]
+        }
+      ],
+      "fake_archives": [
+        "not-really.zip"
+      ]
+    },
+    "16-nested-deep.zip": {
+      "file": "16-nested-deep.zip",
+      "notes": "Three-deep nest: level1.zip → inner.zip → hello.txt.",
+      "expect_paths": [
+        "level1.zip"
+      ],
+      "nested": [
+        {
+          "path": "level1.zip",
+          "expect_paths": [
+            "inner.zip",
+            "note.txt"
+          ]
+        },
+        {
+          "path": "level1.zip",
+          "then": "inner.zip",
+          "expect_paths": [
+            "hello.txt"
+          ],
+          "expect_files": {
+            "hello.txt": "nested-ok\n"
+          }
+        }
+      ]
+    },
+    "17-nested-gbk.zip": {
+      "file": "17-nested-gbk.zip",
+      "notes": "UTF-8 zip containing a GBK zip. Nested listing should still remap names.",
+      "expect_paths": [
+        "legacy-inner.zip",
+        "outer.txt"
+      ],
+      "nested": [
+        {
+          "path": "legacy-inner.zip",
+          "expect_paths": [
+            "刷新目录",
+            "刷新目录/内部说明.txt"
+          ],
+          "expect_files": {
+            "刷新目录/内部说明.txt": "gbk-inside\n"
+          }
+        }
+      ]
+    },
+    "18-duplicate-case.zip": {
+      "file": "18-duplicate-case.zip",
+      "notes": "Readme.txt and readme.txt. List both; extract on APFS is allowed to collide.",
+      "expect_paths": [
+        "Readme.txt",
+        "readme.txt"
+      ],
+      "skip_extract": true
+    },
+    "19-formats.tar": {
+      "file": "19-formats.tar",
+      "notes": "Plain tar with a folder and UTF-8 name.",
+      "expect_paths": [
+        "docs/hello.txt",
+        "docs/中文.txt"
+      ],
+      "expect_files": {
+        "docs/hello.txt": "tar-hello\n",
+        "docs/中文.txt": "tar-zh\n"
+      }
+    },
+    "20-formats.tgz": {
+      "file": "20-formats.tgz",
+      "notes": "gzip-wrapped tar. 7-Zip lists one member; double-click it to open the tar.",
+      "expect_file_count": 1,
+      "nested": [
+        {
+          "index": 0,
+          "expect_paths": [
+            "docs/hello.txt",
+            "docs/中文.txt"
+          ],
+          "expect_files": {
+            "docs/hello.txt": "tar-hello\n"
+          }
+        }
+      ]
+    },
+    "21-formats.tar.bz2": {
+      "file": "21-formats.tar.bz2",
+      "notes": "bzip2-wrapped tar. Double-click the inner tar.",
+      "expect_file_count": 1,
+      "nested": [
+        {
+          "index": 0,
+          "expect_paths": [
+            "docs/hello.txt",
+            "docs/中文.txt"
+          ],
+          "expect_files": {
+            "docs/hello.txt": "tar-hello\n"
+          }
+        }
+      ]
+    },
+    "22-formats.tar.xz": {
+      "file": "22-formats.tar.xz",
+      "notes": "xz-wrapped tar. Double-click the inner tar.",
+      "expect_file_count": 1,
+      "nested": [
+        {
+          "index": 0,
+          "expect_paths": [
+            "docs/hello.txt",
+            "docs/中文.txt"
+          ],
+          "expect_files": {
+            "docs/hello.txt": "tar-hello\n"
+          }
+        }
+      ]
+    },
+    "23-symlink.tar": {
+      "file": "23-symlink.tar",
+      "notes": "Regular file plus a symlink. Listing should show both.",
+      "expect_paths": [
+        "target.txt"
+      ],
+      "expect_files": {
+        "target.txt": "target\n"
+      },
+      "skip_extract": false
+    },
+    "24-plain.7z": {
+      "file": "24-plain.7z",
+      "notes": "Ordinary 7z.",
+      "expect_paths": [
+        "alpha.txt",
+        "bravo.txt",
+        "charlie.txt"
+      ],
+      "expect_files": {
+        "alpha.txt": "alpha\n"
+      }
+    },
+    "25-solid.7z": {
+      "file": "25-solid.7z",
+      "notes": "Solid 7z. Packed size is only meaningful on the first file of a block.",
+      "expect_paths": [
+        "alpha.txt",
+        "bravo.txt",
+        "charlie.txt"
+      ],
+      "expect_files": {
+        "bravo.txt": "bravo\n"
+      },
+      "solid": true
+    },
+    "26-encrypted.zip": {
+      "file": "26-encrypted.zip",
+      "notes": "Password-protected zip. Password: secret",
+      "password": "secret",
+      "expect_paths": [
+        "alpha.txt"
+      ],
+      "expect_files": {
+        "alpha.txt": "alpha\n"
+      }
+    },
+    "27-encrypted.7z": {
+      "file": "27-encrypted.7z",
+      "notes": "Password-protected 7z (data only). Password: secret",
+      "password": "secret",
+      "expect_paths": [
+        "alpha.txt",
+        "bravo.txt"
+      ],
+      "expect_files": {
+        "alpha.txt": "alpha\n"
+      }
+    },
+    "28-encrypted-headers.7z": {
+      "file": "28-encrypted-headers.7z",
+      "notes": "7z with encrypted headers. Listing without a password should fail. Password: secret",
+      "password": "secret",
+      "encrypt_headers": true,
+      "expect_paths": [
+        "alpha.txt"
+      ],
+      "expect_files": {
+        "alpha.txt": "alpha\n"
+      },
+      "require_password_to_list": true
+    },
+    "29-wim.wim": {
+      "file": "29-wim.wim",
+      "notes": "WIM container.",
+      "expect_paths": [
+        "alpha.txt",
+        "bravo.txt"
+      ],
+      "expect_files": {
+        "alpha.txt": "alpha\n"
+      }
+    },
+    "30-nested-7z.zip": {
+      "file": "30-nested-7z.zip",
+      "notes": "Zip containing a 7z. Double-click plain.7z should open in-app.",
+      "expect_paths": [
+        "plain.7z",
+        "side.txt"
+      ],
+      "nested": [
+        {
+          "path": "plain.7z",
+          "expect_paths": [
+            "alpha.txt",
+            "bravo.txt",
+            "charlie.txt"
+          ]
+        }
+      ]
+    }
+  }
+}
