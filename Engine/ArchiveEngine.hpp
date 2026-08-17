@@ -84,16 +84,21 @@ public:
     const std::string& libraryPath() const { return libraryPath_; }
 
     ArchiveInfo list(const std::string& archivePath, const std::string& password = "");
+    ArchiveInfo list(const std::string& archivePath,
+                     const std::vector<std::uint32_t>& nestIndices,
+                     const std::string& password);
 
     void extract(const std::string& archivePath,
                  const std::string& destination,
                  const std::vector<std::uint32_t>& indices,
                  const std::string& password,
-                 const ProgressPtr& progress);
+                 const ProgressPtr& progress,
+                 const std::vector<std::uint32_t>& nestIndices = {});
 
     void test(const std::string& archivePath,
               const std::string& password,
-              const ProgressPtr& progress);
+              const ProgressPtr& progress,
+              const std::vector<std::uint32_t>& nestIndices = {});
 
     void create(const std::string& archivePath,
                 const std::vector<std::string>& inputPaths,
@@ -114,6 +119,7 @@ public:
     static std::string extensionForFormat(Format format);
     static std::string displayNameForFormat(Format format);
     static Format formatFromExtension(const std::string& pathOrExt);
+    static bool isArchiveFileName(const std::string& name);
 
 private:
     Engine() = default;

@@ -558,6 +558,48 @@ std::string joinArchivePath(const std::string& folder, const std::string& name) 
     return folder + "/" + name;
 }
 
+ArchiveInfo fillInfo(BitArchiveReader& reader, const std::string& path, bool canUpdate) {
+    ArchiveInfo info;
+    info.path = path;
+    info.formatName = nameFromBit(reader.detectedFormat());
+    info.format = formatFromBit(reader.detectedFormat());
+    info.canUpdate = canUpdate && writableFormat(reader.detectedFormat()) != nullptr;
+    info.encrypted = reader.hasEncryptedItems() || reader.isEncrypted();
+    info.solid = reader.isSolid();
+    info.fileCount = reader.filesCount();
+    info.folderCount = reader.foldersCount();
+    info.totalSize = reader.size();
+    info.packedSize = reader.packSize();
+    info.items.reserve(reader.itemsCount());
+    for (const auto& entry : reader.items()) {
+        info.items.push_back(itemFromInfo(entry));
+    }
+    return info;
+}
+
+// Pull each nested item into memory so the inner archive can be opened
+// without writing it to disk (zip-in-zip, tar inside gz, etc.).
+buffer_t peelNested(const Bit7zLibrary& lib,
+                    const std::string& archivePath,
+                    const std::vector<std::uint32_t>& nestIndices,
+                    const std::string& password) {
+    if (nestIndices.empty()) {
+        return {};
+    }
+    buffer_t blob;
+    {
+        BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
+        reader.extractTo(blob, nestIndices.front());
+    }
+    for (std::size_t i = 1; i < nestIndices.size(); ++i) {
+        BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+        buffer_t next;
+        reader.extractTo(next, nestIndices[i]);
+        blob.swap(next);
+    }
+    return blob;
+}
+
 } // namespace
 
 Engine& Engine::instance() {
@@ -575,29 +617,26 @@ void Engine::setLibraryPath(const std::string& path) {
 }
 
 ArchiveInfo Engine::list(const std::string& archivePath, const std::string& password) {
+    return list(archivePath, {}, password);
+}
+
+ArchiveInfo Engine::list(const std::string& archivePath,
+                         const std::vector<std::uint32_t>& nestIndices,
+                         const std::string& password) {
     std::lock_guard<std::mutex> lock(gMutex);
     try {
         auto& lib = library(libraryPath_);
-        BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
-        ArchiveInfo info;
-        info.path = archivePath;
-        info.formatName = nameFromBit(reader.detectedFormat());
-        info.format = formatFromBit(reader.detectedFormat());
-        info.canUpdate = writableFormat(reader.detectedFormat()) != nullptr;
-        info.encrypted = reader.hasEncryptedItems() || reader.isEncrypted();
-        info.solid = reader.isSolid();
-        info.fileCount = reader.filesCount();
-        info.folderCount = reader.foldersCount();
-        info.totalSize = reader.size();
-        info.packedSize = reader.packSize();
-        info.items.reserve(reader.itemsCount());
-        for (const auto& entry : reader.items()) {
-            info.items.push_back(itemFromInfo(entry));
+        if (nestIndices.empty()) {
+            BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
+            ArchiveInfo info = fillInfo(reader, archivePath, true);
+            if (info.format == Format::Zip) {
+                applyZipNames(info.items, zipDecodedPaths(archivePath));
+            }
+            return info;
         }
-        if (info.format == Format::Zip) {
-            applyZipNames(info.items, zipDecodedPaths(archivePath));
-        }
-        return info;
+        const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
+        BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+        return fillInfo(reader, archivePath, false);
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -607,14 +646,27 @@ void Engine::extract(const std::string& archivePath,
                      const std::string& destination,
                      const std::vector<std::uint32_t>& indices,
                      const std::string& password,
-                     const ProgressPtr& progress) {
+                     const ProgressPtr& progress,
+                     const std::vector<std::uint32_t>& nestIndices) {
     std::lock_guard<std::mutex> lock(gMutex);
     try {
         auto& lib = library(libraryPath_);
+        fs::create_directories(destination);
+        if (!nestIndices.empty()) {
+            const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
+            BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+            reader.setOverwriteMode(OverwriteMode::Overwrite);
+            attachProgress(reader, progress);
+            if (indices.empty()) {
+                reader.extractTo(destination);
+            } else {
+                reader.extractTo(destination, indices);
+            }
+            return;
+        }
         BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
         reader.setOverwriteMode(OverwriteMode::Overwrite);
         attachProgress(reader, progress);
-        fs::create_directories(destination);
         const auto zipNames = (formatFromBit(reader.detectedFormat()) == Format::Zip)
                                   ? zipDecodedPaths(archivePath)
                                   : std::unordered_map<std::uint32_t, std::string>{};
@@ -639,10 +691,18 @@ void Engine::extract(const std::string& archivePath,
 
 void Engine::test(const std::string& archivePath,
                   const std::string& password,
-                  const ProgressPtr& progress) {
+                  const ProgressPtr& progress,
+                  const std::vector<std::uint32_t>& nestIndices) {
     std::lock_guard<std::mutex> lock(gMutex);
     try {
         auto& lib = library(libraryPath_);
+        if (!nestIndices.empty()) {
+            const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
+            BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+            attachProgress(reader, progress);
+            reader.test();
+            return;
+        }
         BitFileExtractor extractor{lib, BitFormat::Auto};
         if (!password.empty()) {
             extractor.setPassword(password);
@@ -778,6 +838,29 @@ Format Engine::formatFromExtension(const std::string& pathOrExt) {
     if (ext == "xz" || ext == "txz") return Format::Xz;
     if (ext == "wim") return Format::Wim;
     return Format::Unknown;
+}
+
+bool Engine::isArchiveFileName(const std::string& name) {
+    static const char* const kExts[] = {
+        "7z", "zip", "zipx", "jar", "apk", "tar", "gz", "gzip", "tgz",
+        "bz2", "bzip2", "tbz", "tbz2", "xz", "txz", "rar", "wim", "iso",
+        "cab", "dmg", "cpio", "rpm", "deb", "lzh", "lha", "lzma", "z",
+    };
+    std::string ext = name;
+    const auto dot = ext.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= ext.size()) {
+        return false;
+    }
+    ext = ext.substr(dot + 1);
+    for (char& ch : ext) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    for (const char* known : kExts) {
+        if (ext == known) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace rz

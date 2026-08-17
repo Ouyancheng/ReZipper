@@ -7,6 +7,7 @@
 static void usage() {
     std::cerr << "Usage:\n"
               << "  rezipper-cli --lib <7z.so> list <archive> [password]\n"
+              << "  rezipper-cli --lib <7z.so> nest-list <archive> <index[,index...]> [password]\n"
               << "  rezipper-cli --lib <7z.so> test <archive> [password]\n"
               << "  rezipper-cli --lib <7z.so> extract <archive> <dest> [password]\n"
               << "  rezipper-cli --lib <7z.so> create <archive> <file...>\n"
@@ -38,9 +39,30 @@ int main(int argc, char** argv) {
     rz::Engine::instance().setLibraryPath(lib);
     const std::string cmd = args[0];
     try {
-        if (cmd == "list") {
-            const std::string password = args.size() > 2 ? args[2] : "";
-            const auto info = rz::Engine::instance().list(args[1], password);
+        if (cmd == "list" || cmd == "nest-list") {
+            std::vector<std::uint32_t> nest;
+            std::string password;
+            if (cmd == "nest-list") {
+                if (args.size() < 3) {
+                    usage();
+                    return 2;
+                }
+                std::string spec = args[2];
+                std::size_t start = 0;
+                while (start < spec.size()) {
+                    const auto comma = spec.find(',', start);
+                    const auto token = spec.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                    nest.push_back(static_cast<std::uint32_t>(std::stoul(token)));
+                    if (comma == std::string::npos) {
+                        break;
+                    }
+                    start = comma + 1;
+                }
+                password = args.size() > 3 ? args[3] : "";
+            } else {
+                password = args.size() > 2 ? args[2] : "";
+            }
+            const auto info = rz::Engine::instance().list(args[1], nest, password);
             std::cout << info.formatName << "  files=" << info.fileCount
                       << " folders=" << info.folderCount
                       << " size=" << info.totalSize

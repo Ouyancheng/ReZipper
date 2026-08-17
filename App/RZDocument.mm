@@ -12,6 +12,10 @@
 @property (nonatomic, assign, readwrite) unsigned long long totalSize;
 @property (nonatomic, assign, readwrite) unsigned long long packedSize;
 @property (nonatomic, strong, readwrite) RZFolderNode *rootFolder;
+@property (nonatomic, copy, readwrite) NSString *nestRootPath;
+@property (nonatomic, copy, readwrite) NSArray<NSNumber *> *nestIndices;
+@property (nonatomic, copy, readwrite) NSString *nestTitle;
+- (void)applyInfo:(const rz::ArchiveInfo &)info rootName:(NSString *)rootName;
 @end
 
 @implementation RZDocument
@@ -39,6 +43,7 @@
         _password = @"";
         _items = @[];
         _formatName = @"archive";
+        _nestIndices = @[];
         _rootFolder = [[RZFolderNode alloc] init];
         _rootFolder.name = @"Archive";
     }
@@ -95,7 +100,113 @@
     return NO;
 }
 
++ (BOOL)isArchiveFileName:(NSString *)name {
+    return rz::Engine::isArchiveFileName(RZStd(name));
+}
+
++ (instancetype)prepareNestedFrom:(RZDocument *)parent item:(RZItem *)item {
+    if (!parent || !item || item.isDir || !parent.archiveFilePath.length) {
+        return nil;
+    }
+    RZDocument *doc = [[RZDocument alloc] init];
+    doc.password = parent.password ?: @"";
+    doc.nestRootPath = parent.archiveFilePath;
+    NSMutableArray<NSNumber *> *chain = [parent.nestIndices mutableCopy] ?: [NSMutableArray array];
+    [chain addObject:@(item.index)];
+    doc.nestIndices = chain;
+    doc.nestTitle = item.name;
+    return doc;
+}
+
+- (void)presentNestedWindows {
+    [[NSDocumentController sharedDocumentController] addDocument:self];
+    [self makeWindowControllers];
+    [self showWindows];
+}
+
++ (instancetype)openNestedFrom:(RZDocument *)parent item:(RZItem *)item error:(NSError **)error {
+    RZDocument *doc = [self prepareNestedFrom:parent item:item];
+    if (!doc) {
+        return nil;
+    }
+    if (![doc reload:error]) {
+        return nil;
+    }
+    [doc presentNestedWindows];
+    return doc;
+}
+
+- (NSString *)archiveFilePath {
+    if (self.nestRootPath.length) {
+        return self.nestRootPath;
+    }
+    return self.fileURL.path;
+}
+
+- (std::vector<std::uint32_t>)engineNestIndices {
+    std::vector<std::uint32_t> nest;
+    nest.reserve(self.nestIndices.count);
+    for (NSNumber *number in self.nestIndices) {
+        nest.push_back(number.unsignedIntValue);
+    }
+    return nest;
+}
+
+- (NSString *)displayName {
+    if (self.nestTitle.length) {
+        return self.nestTitle;
+    }
+    return [super displayName];
+}
+
+- (void)applyInfo:(const rz::ArchiveInfo &)info rootName:(NSString *)rootName {
+    NSMutableArray<RZItem *> *items = [NSMutableArray arrayWithCapacity:info.items.size()];
+    RZFolderNode *root = [[RZFolderNode alloc] init];
+    root.name = rootName.length ? rootName : @"Archive";
+    root.path = @"";
+    for (const auto& entry : info.items) {
+        RZItem *item = [[RZItem alloc] initWithEngineItem:entry];
+        [items addObject:item];
+        if (item.isDir || [item.path containsString:@"/"]) {
+            RZFolderNode *node = root;
+            NSArray<NSString *> *parts = [item.path componentsSeparatedByString:@"/"];
+            NSUInteger limit = item.isDir ? parts.count : parts.count - 1;
+            for (NSUInteger i = 0; i < limit; i++) {
+                NSString *part = parts[i];
+                if (part.length == 0) {
+                    continue;
+                }
+                node = [node childNamed:part create:YES];
+            }
+        }
+    }
+    self.items = items;
+    self.formatName = RZNS(info.formatName);
+    self.canUpdate = info.canUpdate && self.nestIndices.count == 0;
+    self.encrypted = info.encrypted;
+    self.solid = info.solid;
+    self.fileCount = info.fileCount;
+    self.folderCount = info.folderCount;
+    self.totalSize = info.totalSize;
+    self.packedSize = info.packedSize;
+    self.rootFolder = root;
+}
+
 - (BOOL)reload:(NSError **)error {
+    if (self.nestRootPath.length) {
+        try {
+            const auto info = rz::Engine::instance().list(RZStd(self.nestRootPath),
+                                                          self.engineNestIndices,
+                                                          RZStd(self.password));
+            [self applyInfo:info rootName:self.nestTitle ?: @"Archive"];
+            return YES;
+        } catch (const std::exception& ex) {
+            if (error) {
+                *error = RZErrorFromException(ex);
+            }
+            return NO;
+        }
+    }
     return [self reloadFromURL:self.fileURL error:error];
 }
 
@@ -111,36 +222,7 @@
     }
     try {
         const auto info = rz::Engine::instance().list(RZStd(url.path), RZStd(self.password));
-        NSMutableArray<RZItem *> *items = [NSMutableArray arrayWithCapacity:info.items.size()];
-        RZFolderNode *root = [[RZFolderNode alloc] init];
-        root.name = url.lastPathComponent;
-        root.path = @"";
-        for (const auto& entry : info.items) {
-            RZItem *item = [[RZItem alloc] initWithEngineItem:entry];
-            [items addObject:item];
-            if (item.isDir || [item.path containsString:@"/"]) {
-                RZFolderNode *node = root;
-                NSArray<NSString *> *parts = [item.path componentsSeparatedByString:@"/"];
-                NSUInteger limit = item.isDir ? parts.count : parts.count - 1;
-                for (NSUInteger i = 0; i < limit; i++) {
-                    NSString *part = parts[i];
-                    if (part.length == 0) {
-                        continue;
-                    }
-                    node = [node childNamed:part create:YES];
-                }
-            }
-        }
-        self.items = items;
-        self.formatName = RZNS(info.formatName);
-        self.canUpdate = info.canUpdate;
-        self.encrypted = info.encrypted;
-        self.solid = info.solid;
-        self.fileCount = info.fileCount;
-        self.folderCount = info.folderCount;
-        self.totalSize = info.totalSize;
-        self.packedSize = info.packedSize;
-        self.rootFolder = root;
+        [self applyInfo:info rootName:url.lastPathComponent];
         return YES;
     } catch (const std::exception& ex) {
         if (error) {

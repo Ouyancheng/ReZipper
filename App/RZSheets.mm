@@ -244,8 +244,13 @@ static void RZApplyGlassButton(NSButton *button) {
     NSByteCountFormatter *bytes = [[NSByteCountFormatter alloc] init];
     bytes.countStyle = NSByteCountFormatterCountStyleFile;
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"Name: %@\n", doc.fileURL.lastPathComponent];
-    [text appendFormat:@"Path: %@\n", doc.fileURL.path];
+    if (doc.nestTitle.length) {
+        [text appendFormat:@"Name: %@\n", doc.nestTitle];
+        [text appendFormat:@"Path: %@ → %@\n", doc.nestRootPath, doc.nestTitle];
+    } else {
+        [text appendFormat:@"Name: %@\n", doc.fileURL.lastPathComponent];
+        [text appendFormat:@"Path: %@\n", doc.fileURL.path];
+    }
     [text appendFormat:@"Format: %@\n", doc.formatName];
     [text appendFormat:@"Files: %lu\n", (unsigned long)doc.fileCount];
     [text appendFormat:@"Folders: %lu\n", (unsigned long)doc.folderCount];

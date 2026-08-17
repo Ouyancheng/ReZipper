@@ -303,7 +303,7 @@ static NSString * const RZColMethod = @"method";
     [super showWindow:sender];
     [self.splitView setPosition:220 ofDividerAtIndex:0];
     RZDocument *doc = self.archiveDocument;
-    if (doc.fileURL && doc.items.count == 0 && !doc.needsPassword) {
+    if ((doc.fileURL || doc.nestRootPath.length) && doc.items.count == 0 && !doc.needsPassword) {
         [doc reload:nil];
     }
     [self unlockIfNeeded];
@@ -409,11 +409,16 @@ static NSString * const RZColMethod = @"method";
 
 - (void)reloadBrowser {
     RZDocument *doc = self.archiveDocument;
-    if (!doc.fileURL) {
+    if (!doc.fileURL && !doc.nestRootPath.length) {
         return;
     }
-    self.window.representedFilename = doc.fileURL.path;
-    self.window.title = doc.fileURL.lastPathComponent;
+    if (doc.fileURL) {
+        self.window.representedFilename = doc.fileURL.path;
+        self.window.title = doc.fileURL.lastPathComponent;
+    } else {
+        self.window.representedFilename = doc.nestRootPath;
+        self.window.title = doc.nestTitle ?: @"Archive";
+    }
     self.window.subtitle = doc.formatName.uppercaseString;
     [self.treeView reloadData];
     [self.treeView expandItem:nil expandChildren:YES];
@@ -479,7 +484,8 @@ static NSString * const RZColMethod = @"method";
 
 - (void)updatePathControl {
     NSMutableArray<NSView *> *views = [NSMutableArray array];
-    NSString *rootTitle = self.archiveDocument.fileURL.lastPathComponent ?: @"Archive";
+    NSString *rootTitle = self.archiveDocument.fileURL.lastPathComponent
+        ?: (self.archiveDocument.nestTitle ?: @"Archive");
     [views addObject:[self rz_crumbWithTitle:rootTitle symbol:@"archivebox.fill" tag:0]];
 
     NSArray<NSString *> *parts = self.currentPath.length ? [self.currentPath componentsSeparatedByString:@"/"] : @[];
@@ -747,11 +753,12 @@ static NSString * const RZColMethod = @"method";
         NSError *error = nil;
         try {
             NSString *folder = url.URLByDeletingLastPathComponent.path;
-            rz::Engine::instance().extract(RZStd(doc.fileURL.path),
+            rz::Engine::instance().extract(RZStd(doc.archiveFilePath),
                                            RZStd(folder),
                                            {item.index},
                                            RZStd(doc.password),
-                                           nullptr);
+                                           nullptr,
+                                           doc.engineNestIndices);
             NSString *extracted = [folder stringByAppendingPathComponent:item.path];
             if (![extracted isEqualToString:url.path] && [[NSFileManager defaultManager] fileExistsAtPath:extracted]) {
                 [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
@@ -844,11 +851,7 @@ static NSString * const RZColMethod = @"method";
 #pragma mark - Operations
 
 - (BOOL)ensureLoaded {
-    RZDocument *doc = self.archiveDocument;
-    if (doc.fileURL) {
-        return YES;
-    }
-    return NO;
+    return self.archiveDocument.archiveFilePath.length > 0;
 }
 
 - (BOOL)promptForPasswordIfNeeded:(NSError *)error {
@@ -1049,8 +1052,8 @@ static NSString * const RZColMethod = @"method";
         }
     }
     [self runWork:@"Extracting…" work:^(rz::ProgressPtr progress) {
-        rz::Engine::instance().extract(RZStd(doc.fileURL.path), RZStd(destination), indices,
-                                       RZStd(doc.password), progress);
+        rz::Engine::instance().extract(RZStd(doc.archiveFilePath), RZStd(destination), indices,
+                                       RZStd(doc.password), progress, doc.engineNestIndices);
         if (selectedOnly) {
             [self rz_flattenExtractedItems:roots toDestination:destination];
         }
@@ -1072,7 +1075,8 @@ static NSString * const RZColMethod = @"method";
     }
     RZDocument *doc = self.archiveDocument;
     [self runWork:@"Testing archive…" work:^(rz::ProgressPtr progress) {
-        rz::Engine::instance().test(RZStd(doc.fileURL.path), RZStd(doc.password), progress);
+        rz::Engine::instance().test(RZStd(doc.archiveFilePath), RZStd(doc.password), progress,
+                                   doc.engineNestIndices);
     } completion:^(NSError *error) {
         if (error) {
             [self presentErrorOrPassword:error retry:^{ [self testArchive:self]; }];
@@ -1083,6 +1087,57 @@ static NSString * const RZColMethod = @"method";
         alert.informativeText = @"No errors were found.";
         alert.alertStyle = NSAlertStyleInformational;
         [alert beginSheetModalForWindow:self.window completionHandler:nil];
+    }];
+}
+
+- (void)extractAndOpenItem:(RZItem *)item {
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ReZipperView"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil];
+    RZDocument *doc = self.archiveDocument;
+    [self runWork:@"Opening…" work:^(rz::ProgressPtr progress) {
+        rz::Engine::instance().extract(RZStd(doc.archiveFilePath), RZStd(temp), {item.index},
+                                       RZStd(doc.password), progress, doc.engineNestIndices);
+    } completion:^(NSError *error) {
+        if (error) {
+            [self presentErrorOrPassword:error retry:^{ [self extractAndOpenItem:item]; }];
+            return;
+        }
+        NSString *extracted = [temp stringByAppendingPathComponent:item.path];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:extracted]) {
+            extracted = [temp stringByAppendingPathComponent:item.name];
+        }
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:extracted]];
+    }];
+}
+
+- (void)openNestedItem:(RZItem *)item document:(RZDocument *)nested {
+    [self runWork:@"Opening archive…" work:^(rz::ProgressPtr progress) {
+        (void)progress;
+        NSError *error = nil;
+        if (![nested reload:&error]) {
+            if (RZIsPasswordError(error)) {
+                throw rz::EngineError(RZStd(error.localizedDescription), true);
+            }
+            throw rz::EngineError(RZStd(error.localizedDescription.length
+                                            ? error.localizedDescription
+                                            : @"Could not open nested archive"));
+        }
+    } completion:^(NSError *error) {
+        if (RZIsPasswordError(error)) {
+            RZPasswordController *sheet = [[RZPasswordController alloc] init];
+            NSModalResponse response = [sheet runSheetForWindow:self.window
+                                                        message:@"Enter the nested archive password to continue."];
+            if (response == NSModalResponseOK && sheet.password.length > 0) {
+                nested.password = sheet.password;
+                [self openNestedItem:item document:nested];
+            }
+            return;
+        }
+        if (error) {
+            [self extractAndOpenItem:item];
+            return;
+        }
+        [nested presentNestedWindows];
     }];
 }
 
@@ -1098,23 +1153,14 @@ static NSString * const RZColMethod = @"method";
     if (!item || item.isDir) {
         return;
     }
-    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ReZipperView"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil];
-    RZDocument *doc = self.archiveDocument;
-    [self runWork:@"Opening…" work:^(rz::ProgressPtr progress) {
-        rz::Engine::instance().extract(RZStd(doc.fileURL.path), RZStd(temp), {item.index},
-                                       RZStd(doc.password), progress);
-    } completion:^(NSError *error) {
-        if (error) {
-            [self presentErrorOrPassword:error retry:^{ [self viewSelection:self]; }];
+    if ([RZDocument isArchiveFileName:item.name]) {
+        RZDocument *nested = [RZDocument prepareNestedFrom:self.archiveDocument item:item];
+        if (nested) {
+            [self openNestedItem:item document:nested];
             return;
         }
-        NSString *extracted = [temp stringByAppendingPathComponent:item.path];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:extracted]) {
-            extracted = [temp stringByAppendingPathComponent:item.name];
-        }
-        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:extracted]];
-    }];
+    }
+    [self extractAndOpenItem:item];
 }
 
 - (IBAction)deleteSelection:(id)sender {

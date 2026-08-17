@@ -18,7 +18,19 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign, readonly) unsigned long long totalSize;
 @property (nonatomic, assign, readonly) unsigned long long packedSize;
 @property (nonatomic, strong, readonly) RZFolderNode *rootFolder;
+@property (nonatomic, copy, readonly, nullable) NSString *nestRootPath;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *nestIndices;
+@property (nonatomic, copy, readonly, nullable) NSString *nestTitle;
 
++ (BOOL)isArchiveFileName:(NSString *)name;
++ (nullable instancetype)prepareNestedFrom:(RZDocument *)parent item:(RZItem *)item;
++ (nullable instancetype)openNestedFrom:(RZDocument *)parent
+                                   item:(RZItem *)item
+                                  error:(NSError * _Nullable * _Nullable)error;
+- (void)presentNestedWindows;
+
+- (NSString *)archiveFilePath;
+- (std::vector<std::uint32_t>)engineNestIndices;
 - (BOOL)reload:(NSError * _Nullable * _Nullable)error;
 - (BOOL)reloadFromURL:(NSURL *)url error:(NSError * _Nullable * _Nullable)error;
 - (void)notifyWindows;
