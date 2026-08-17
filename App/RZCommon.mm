@@ -24,6 +24,9 @@
 
 - (NSString *)parentPath {
     NSString *path = self.path;
+    while (path.length > 1 && [path hasSuffix:@"/"]) {
+        path = [path substringToIndex:path.length - 1];
+    }
     NSRange slash = [path rangeOfString:@"/" options:NSBackwardsSearch];
     if (slash.location == NSNotFound) {
         return @"";

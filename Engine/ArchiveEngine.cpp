@@ -139,6 +139,11 @@ std::string posixPath(std::string path) {
     while (!path.empty() && path.front() == '/') {
         path.erase(path.begin());
     }
+    // ZIP directory entries are stored as "folder/". That trailing slash
+    // makes parentPath() skip the folder at the archive root.
+    while (!path.empty() && path.back() == '/') {
+        path.pop_back();
+    }
     return path;
 }
 
