@@ -30,7 +30,7 @@ ReZipper is AppKit all the way down — not a web view, not a cross-platform kit
 
 | | |
 | --- | --- |
-| **Toolbar** | Add, Extract, Test, Quick Look, Delete, Info, and a live Filter field |
+| **Toolbar** | Add, Extract, Test, View, Delete, Info, and a live Filter field |
 | **Sidebar** | Folder tree for the archive, the way Finder does a volume |
 | **List** | Name, Size, Packed, Modified, CRC, Method |
 | **Path bar** | Jump to any ancestor without rebuilding the window |
@@ -42,9 +42,9 @@ ReZipper is AppKit all the way down — not a web view, not a cross-platform kit
 
 - Browse archives in a Finder-like split view
 - Create `7z`, `zip`, `tar`, `gz`, `bz2`, `xz`, and `wim`
-- Extract the whole archive, or just the selected file / folder — **without** replaying the parent path
+- Extract the whole archive, or just the selected file / folder — without replaying the parent path structure
 - Add files and folders to writable archives
-- Delete items, test integrity, Quick Look previews
+- Delete items, test integrity, in-memory Space preview
 - AES passwords, optional 7z header encryption, solid archives
 - Drag files in to add; drag files out to extract
 
@@ -88,6 +88,50 @@ ReZipper reads the raw central-directory names, sniffs GBK / Shift-JIS / Big5 / 
 | `[ACE&TGB]°∂”ƒ¡ÈπÓ°∆…Â∞Ê.nds` | `[ACE&TGB]《幽灵诡计》完美汉化仿原字体版.nds` |
 | `µÄÕÊ÷ÆÆ° “œ¬˜‘ÿ∞Ô÷˙.txt` | `电玩之家下载帮助.txt` |
 | `∏‚∂‡µÄÕÊ◊ˇ￥œ¬˜‘ÿ.url` | `更多电玩资源下载.url` |
+
+---
+
+## Space to preview
+
+Press **Space** (or **⌘Y**) on a file in the list. ReZipper decompresses **that item only** into **RAM** and draws it in its own preview window. The rest of the archive stays packed. Nothing is written under `/tmp`. Press **Space** again to close the preview window, unless the cursor focus is inside the preview-ed content.
+
+This is not Finder’s system Quick Look panel. That API (`QLPreviewPanel`) requires a `file://` URL, which means extracting to a temporary file. ReZipper keeps the bytes in memory instead: `extractItem` → `NSData` → `NSImage` / PDFKit / `NSTextView`.
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot-InMemoryPreview.png" width="920" alt="In-memory preview of 电玩之家下载帮助.txt inside qizhads.zip">
+</p>
+
+<p align="center"><em>Space on <code>电玩之家下载帮助.txt</code> in <code>qizhads.zip</code>. The GBK name is remapped; the body is decoded in memory — no extract to disk.</em></p>
+
+**Supported in memory**
+
+| Kind | How |
+| --- | --- |
+| Images | Anything `NSImage` can load from data (PNG, JPEG, HEIC, GIF, TIFF, …) |
+| PDF | PDFKit from the buffer |
+| RTF | `NSAttributedString` from RTF data |
+| HTML | Rendered from HTML data |
+| Text / code / JSON / XML | Decoded as UTF-8, UTF-16, or a sniffed 8-bit encoding |
+| Empty files | A short “empty” note |
+
+**Not previewed in memory**
+
+Office documents, video, audio, ROMs, nested archives, and other binary types. Files larger than **128 MB** are skipped so a single Space does not pin a huge buffer.
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot-NoInMemoryPreview.png" width="920" alt="Unsupported in-memory preview of an NDS ROM inside qizhads.zip">
+</p>
+
+<p align="center"><em>An <code>.nds</code> ROM has no in-memory renderer. Return / View extracts <em>this</em> item only and opens it.</em></p>
+
+| Pros | Cons |
+| --- | --- |
+| No temp file, no leftover clutter | Not Finder’s Quick Look chrome |
+| Faster for small text and images — no disk write, no Preview.app | Office, media, and other types need Return |
+| Only one member is decompressed | Solid 7z still has to walk the solid block to reach the file |
+| Archive names stay decoded (GBK / Shift-JIS / …) | 128 MB cap; compressed bytes cannot be shown as-is |
+
+Up / down while the preview is open moves the list selection and refreshes. Space or Escape closes it.
 
 ---
 
