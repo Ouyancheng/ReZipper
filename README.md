@@ -110,13 +110,13 @@ This is not Finder’s system Quick Look panel. That API (`QLPreviewPanel`) requ
 | Images | Anything `NSImage` can load from data (PNG, JPEG, HEIC, GIF, TIFF, …) |
 | PDF | PDFKit from the buffer |
 | RTF | `NSAttributedString` from RTF data |
-| HTML | Rendered from HTML data |
+| HTML | Shown as source text (no remote loads) |
 | Text / code / JSON / XML | Decoded as UTF-8, UTF-16, or a sniffed 8-bit encoding |
 | Empty files | A short “empty” note |
 
 **Not previewed in memory**
 
-Office documents, video, audio, ROMs, nested archives, and other binary types. Files larger than **128 MB** are skipped so a single Space does not pin a huge buffer.
+Office documents, video, audio, ROMs, nested archives, and other binary types. The **file you Space** is skipped if it is larger than **128 MB**. Opening a nested archive already inflates that container in RAM, and Space reuses it — a 2 KB file inside a 600 MB tar still previews.
 
 <p align="center">
   <img src="docs/screenshots/Screenshot-NoInMemoryPreview.png" width="920" alt="Unsupported in-memory preview of an NDS ROM inside qizhads.zip">

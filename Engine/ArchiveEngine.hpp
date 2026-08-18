@@ -96,11 +96,20 @@ public:
                  const std::vector<std::uint32_t>& nestIndices = {});
 
     // Decompress one item into memory. Does not write the archive to disk.
+    // If maxBytes > 0, stops and throws when that item (not its nest container)
+    // is larger than that. Nested archives reuse the blob from list() while
+    // retainNestedBlob() holders remain, or until the outer archive changes.
     std::vector<std::uint8_t> extractItem(const std::string& archivePath,
                                           std::uint32_t index,
                                           const std::string& password,
                                           const ProgressPtr& progress,
-                                          const std::vector<std::uint32_t>& nestIndices = {});
+                                          const std::vector<std::uint32_t>& nestIndices = {},
+                                          std::uint64_t maxBytes = 0);
+
+    void retainNestedBlob(const std::string& archivePath,
+                          const std::vector<std::uint32_t>& nestIndices);
+    void releaseNestedBlob(const std::string& archivePath,
+                           const std::vector<std::uint32_t>& nestIndices);
 
     void test(const std::string& archivePath,
               const std::string& password,

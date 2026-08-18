@@ -33,6 +33,7 @@ static void RZAddVirtualFolders(RZFolderNode *node,
 @property (nonatomic, copy, readwrite) NSString *nestRootPath;
 @property (nonatomic, copy, readwrite) NSArray<NSNumber *> *nestIndices;
 @property (nonatomic, copy, readwrite) NSString *nestTitle;
+@property (nonatomic, assign) BOOL nestBlobHeld;
 - (void)applyInfo:(const rz::ArchiveInfo &)info rootName:(NSString *)rootName;
 @end
 
@@ -71,6 +72,14 @@ static void RZAddVirtualFolders(RZFolderNode *node,
 - (void)makeWindowControllers {
     RZMainWindowController *controller = [[RZMainWindowController alloc] init];
     [self addWindowController:controller];
+}
+
+- (void)close {
+    if (self.nestBlobHeld) {
+        rz::Engine::instance().releaseNestedBlob(RZStd(self.nestRootPath), self.engineNestIndices);
+        self.nestBlobHeld = NO;
+    }
+    [super close];
 }
 
 - (BOOL)readFromURL:(NSURL *)url ofType:(NSString *)typeName error:(NSError **)outError {
@@ -222,6 +231,11 @@ static void RZAddVirtualFolders(RZFolderNode *node,
             const auto info = rz::Engine::instance().list(RZStd(self.nestRootPath),
                                                           self.engineNestIndices,
                                                           RZStd(self.password));
+            if (!self.nestBlobHeld) {
+                rz::Engine::instance().retainNestedBlob(RZStd(self.nestRootPath),
+                                                        self.engineNestIndices);
+                self.nestBlobHeld = YES;
+            }
             [self applyInfo:info rootName:self.nestTitle ?: @"Archive"];
             return YES;
         } catch (const std::exception& ex) {

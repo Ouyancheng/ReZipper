@@ -2,8 +2,54 @@
 #import <PDFKit/PDFKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+static NSString *RZDecodePreviewText(NSData *data) {
+    if (data.length == 0) {
+        return @"";
+    }
+    const unsigned char *bytes = static_cast<const unsigned char *>(data.bytes);
+    if (data.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        return [[NSString alloc] initWithData:data encoding:NSUTF16LittleEndianStringEncoding];
+    }
+    if (data.length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        return [[NSString alloc] initWithData:data encoding:NSUTF16BigEndianStringEncoding];
+    }
+    NSString *utf8 = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (utf8) {
+        return utf8;
+    }
+    NSString *decoded = nil;
+    (void)[NSString stringEncodingForData:data
+                          encodingOptions:@{
+                              NSStringEncodingDetectionSuggestedEncodingsKey: @[
+                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)),
+                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGBK_95)),
+                                  @(NSShiftJISStringEncoding),
+                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingBig5)),
+                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingEUC_KR)),
+                                  @(NSISOLatin1StringEncoding),
+                              ],
+                              NSStringEncodingDetectionUseOnlySuggestedEncodingsKey: @NO,
+                          }
+                          convertedString:&decoded
+                      usedLossyConversion:NULL];
+    if (decoded.length == 0) {
+        return nil;
+    }
+    NSUInteger nuls = 0;
+    NSUInteger probe = MIN(data.length, (NSUInteger)4096);
+    for (NSUInteger i = 0; i < probe; i++) {
+        if (bytes[i] == 0) {
+            nuls++;
+        }
+    }
+    if (probe > 0 && nuls * 20 > probe) {
+        return nil;
+    }
+    return decoded;
+}
+
 @interface RZPreviewPanel : NSPanel
-@property (nonatomic, copy, nullable) void (^keyHandler)(NSEvent *event);
+@property (nonatomic, copy, nullable) BOOL (^keyHandler)(NSEvent *event);
 @end
 
 @implementation RZPreviewPanel
@@ -13,8 +59,7 @@
 }
 
 - (void)keyDown:(NSEvent *)event {
-    if (self.keyHandler) {
-        self.keyHandler(event);
+    if (self.keyHandler && self.keyHandler(event)) {
         return;
     }
     [super keyDown:event];
@@ -59,7 +104,7 @@
     return self;
 }
 
-- (void)setKeyHandler:(void (^)(NSEvent *))keyHandler {
+- (void)setKeyHandler:(BOOL (^)(NSEvent *))keyHandler {
     _keyHandler = [keyHandler copy];
     ((RZPreviewPanel *)self.window).keyHandler = _keyHandler;
 }
@@ -216,38 +261,8 @@
         return NO;
     }
 
-    if ([type conformsToType:UTTypeHTML]) {
-        NSAttributedString *html = [[NSAttributedString alloc] initWithHTML:data documentAttributes:nil];
-        if (html.length) {
-            [self showText:html];
-            return YES;
-        }
-    }
-
-    NSString *decoded = nil;
-    (void)[NSString stringEncodingForData:data
-                          encodingOptions:@{
-                              NSStringEncodingDetectionSuggestedEncodingsKey: @[
-                                  @(NSUTF8StringEncoding),
-                                  @(NSUTF16StringEncoding),
-                                  @(NSISOLatin1StringEncoding),
-                              ],
-                              NSStringEncodingDetectionUseOnlySuggestedEncodingsKey: @NO,
-                          }
-                          convertedString:&decoded
-                      usedLossyConversion:NULL];
+    NSString *decoded = RZDecodePreviewText(data);
     if (decoded.length == 0) {
-        return NO;
-    }
-    const char *bytes = static_cast<const char *>(data.bytes);
-    NSUInteger nuls = 0;
-    NSUInteger probe = MIN(data.length, (NSUInteger)4096);
-    for (NSUInteger i = 0; i < probe; i++) {
-        if (bytes[i] == 0) {
-            nuls++;
-        }
-    }
-    if (probe > 0 && nuls * 20 > probe) {
         return NO;
     }
     NSDictionary *attrs = @{

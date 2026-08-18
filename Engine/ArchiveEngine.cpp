@@ -2,6 +2,7 @@
 
 #include <bit7z/bit7z.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <climits>
@@ -11,6 +12,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iconv.h>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -724,27 +727,169 @@ std::unordered_map<std::uint32_t, std::string> zipNamesIfZip(BitArchiveReader& r
     return zipDecodedPaths(source);
 }
 
+bool extractCancelled(const ProgressPtr& progress) {
+    return progress && progress->cancel.load(std::memory_order_relaxed);
+}
+
+buffer_t extractCapped(BitArchiveReader& reader,
+                       std::uint32_t index,
+                       const ProgressPtr& progress,
+                       std::uint64_t maxBytes) {
+    attachProgress(reader, progress);
+    if (index >= reader.itemsCount()) {
+        throw EngineError("Invalid archive item");
+    }
+    const std::uint64_t reported = reader.itemAt(index).size();
+    if (maxBytes > 0 && reported > maxBytes) {
+        throw EngineError("File is too large to preview");
+    }
+    if (extractCancelled(progress)) {
+        throw EngineError("Cancelled");
+    }
+    buffer_t blob;
+    if (maxBytes == 0 && !progress) {
+        reader.extractTo(blob, index);
+        return blob;
+    }
+    if (maxBytes > 0 && reported > 0) {
+        blob.reserve(static_cast<size_t>(std::min(reported, maxBytes)));
+    }
+    bool overflow = false;
+    try {
+        reader.extractTo([&](const byte_t* data, std::size_t n) -> bool {
+            if (extractCancelled(progress)) {
+                return false;
+            }
+            if (maxBytes > 0 && blob.size() + n > maxBytes) {
+                overflow = true;
+                return false;
+            }
+            blob.insert(blob.end(), data, data + n);
+            return true;
+        }, {index});
+    } catch (const BitException& ex) {
+        if (overflow) {
+            throw EngineError("File is too large to preview");
+        }
+        if (extractCancelled(progress)) {
+            throw EngineError("Cancelled");
+        }
+        rethrow(ex);
+    }
+    if (overflow) {
+        throw EngineError("File is too large to preview");
+    }
+    if (extractCancelled(progress)) {
+        throw EngineError("Cancelled");
+    }
+    return blob;
+}
+
 // Pull each nested item into memory so the inner archive can be opened
 // without writing it to disk (zip-in-zip, tar inside gz, etc.).
 buffer_t peelNested(const Bit7zLibrary& lib,
                     const std::string& archivePath,
                     const std::vector<std::uint32_t>& nestIndices,
-                    const std::string& password) {
+                    const std::string& password,
+                    const ProgressPtr& progress = {},
+                    std::uint64_t maxBytes = 0) {
     if (nestIndices.empty()) {
         return {};
     }
-    buffer_t blob;
-    {
-        BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
-        reader.extractTo(blob, nestIndices.front());
-    }
+    BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
+    buffer_t blob = extractCapped(reader, nestIndices.front(), progress, maxBytes);
     for (std::size_t i = 1; i < nestIndices.size(); ++i) {
-        BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
-        buffer_t next;
-        reader.extractTo(next, nestIndices[i]);
-        blob.swap(next);
+        BitArchiveReader inner{lib, blob, BitFormat::Auto, password};
+        blob = extractCapped(inner, nestIndices[i], progress, maxBytes);
     }
     return blob;
+}
+
+struct PeelKey {
+    std::string path;
+    std::vector<std::uint32_t> nest;
+
+    bool operator<(const PeelKey& other) const {
+        if (path != other.path) {
+            return path < other.path;
+        }
+        return nest < other.nest;
+    }
+};
+
+struct PeelEntry {
+    std::string password;
+    std::uint64_t fileSize = 0;
+    std::uint64_t fileMtime = 0;
+    std::shared_ptr<buffer_t> blob;
+    int holders = 0;
+};
+
+std::map<PeelKey, PeelEntry> gPeelCache;
+
+void peelIdentity(const std::string& path, std::uint64_t& size, std::uint64_t& mtime) {
+    std::error_code ec;
+    size = fs::file_size(path, ec);
+    if (ec) {
+        size = 0;
+    }
+    const auto stamp = fs::last_write_time(path, ec);
+    mtime = ec ? 0 : static_cast<std::uint64_t>(stamp.time_since_epoch().count());
+}
+
+void clearPeelCache() {
+    gPeelCache.clear();
+}
+
+void adjustPeelHolders(const std::string& path, const std::vector<std::uint32_t>& nest, int delta) {
+    const auto it = gPeelCache.find(PeelKey{path, nest});
+    if (it == gPeelCache.end()) {
+        return;
+    }
+    it->second.holders += delta;
+    if (it->second.holders <= 0) {
+        gPeelCache.erase(it);
+    }
+}
+
+std::shared_ptr<buffer_t> cachedPeel(const Bit7zLibrary& lib,
+                                     const std::string& archivePath,
+                                     const std::vector<std::uint32_t>& nestIndices,
+                                     const std::string& password,
+                                     const ProgressPtr& progress = {}) {
+    std::uint64_t size = 0;
+    std::uint64_t mtime = 0;
+    peelIdentity(archivePath, size, mtime);
+    const PeelKey key{archivePath, nestIndices};
+    const auto it = gPeelCache.find(key);
+    if (it != gPeelCache.end() &&
+        it->second.blob &&
+        it->second.password == password &&
+        it->second.fileSize == size &&
+        it->second.fileMtime == mtime) {
+        return it->second.blob;
+    }
+    if (it != gPeelCache.end()) {
+        it->second.blob.reset();
+    }
+    auto blob = std::make_shared<buffer_t>(
+        peelNested(lib, archivePath, nestIndices, password, progress, 0));
+    auto& entry = gPeelCache[key];
+    entry.password = password;
+    entry.fileSize = size;
+    entry.fileMtime = mtime;
+    entry.blob = blob;
+    return blob;
+}
+
+void invalidatePeelPath(const std::string& path) {
+    for (auto it = gPeelCache.begin(); it != gPeelCache.end(); ) {
+        if (it->first.path == path) {
+            it = gPeelCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace
@@ -760,6 +905,7 @@ void Engine::setLibraryPath(const std::string& path) {
     if (gLoadedPath != path) {
         gLib.reset();
         gLoadedPath.clear();
+        clearPeelCache();
     }
 }
 
@@ -779,10 +925,10 @@ ArchiveInfo Engine::list(const std::string& archivePath,
             remapZipNames(info, zipDecodedPaths(archivePath));
             return info;
         }
-        const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
-        BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+        const auto blob = cachedPeel(lib, archivePath, nestIndices, password);
+        BitArchiveReader reader{lib, *blob, BitFormat::Auto, password};
         ArchiveInfo info = fillInfo(reader, archivePath, false);
-        remapZipNames(info, zipDecodedPaths(blob));
+        remapZipNames(info, zipDecodedPaths(*blob));
         return info;
     } catch (const BitException& ex) {
         rethrow(ex);
@@ -815,11 +961,11 @@ void Engine::extract(const std::string& archivePath,
             });
         };
         if (!nestIndices.empty()) {
-            const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
-            BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+            const auto blob = cachedPeel(lib, archivePath, nestIndices, password, progress);
+            BitArchiveReader reader{lib, *blob, BitFormat::Auto, password};
             reader.setOverwriteMode(OverwriteMode::Overwrite);
             attachProgress(reader, progress);
-            extractMapped(reader, zipNamesIfZip(reader, blob));
+            extractMapped(reader, zipNamesIfZip(reader, *blob));
             return;
         }
         BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
@@ -835,23 +981,22 @@ std::vector<std::uint8_t> Engine::extractItem(const std::string& archivePath,
                                               std::uint32_t index,
                                               const std::string& password,
                                               const ProgressPtr& progress,
-                                              const std::vector<std::uint32_t>& nestIndices) {
+                                              const std::vector<std::uint32_t>& nestIndices,
+                                              std::uint64_t maxBytes) {
     std::lock_guard<std::mutex> lock(gMutex);
     try {
         auto& lib = library(libraryPath_);
-        buffer_t blob;
         if (!nestIndices.empty()) {
-            const buffer_t nested = peelNested(lib, archivePath, nestIndices, password);
-            BitArchiveReader reader{lib, nested, BitFormat::Auto, password};
-            attachProgress(reader, progress);
-            reader.extractTo(blob, index);
-        } else {
-            BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
-            attachProgress(reader, progress);
-            reader.extractTo(blob, index);
+            const auto nested = cachedPeel(lib, archivePath, nestIndices, password, progress);
+            BitArchiveReader reader{lib, *nested, BitFormat::Auto, password};
+            return extractCapped(reader, index, progress, maxBytes);
         }
-        return {blob.begin(), blob.end()};
+        BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
+        return extractCapped(reader, index, progress, maxBytes);
     } catch (const BitException& ex) {
+        if (extractCancelled(progress)) {
+            throw EngineError("Cancelled");
+        }
         rethrow(ex);
     }
 }
@@ -864,8 +1009,8 @@ void Engine::test(const std::string& archivePath,
     try {
         auto& lib = library(libraryPath_);
         if (!nestIndices.empty()) {
-            const buffer_t blob = peelNested(lib, archivePath, nestIndices, password);
-            BitArchiveReader reader{lib, blob, BitFormat::Auto, password};
+            const auto blob = cachedPeel(lib, archivePath, nestIndices, password, progress);
+            BitArchiveReader reader{lib, *blob, BitFormat::Auto, password};
             attachProgress(reader, progress);
             reader.test();
             return;
@@ -897,6 +1042,7 @@ void Engine::create(const std::string& archivePath,
         compressor.setOverwriteMode(OverwriteMode::Overwrite);
         attachProgress(compressor, progress);
         compressor.compress(inputPaths, archivePath);
+        invalidatePeelPath(archivePath);
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -929,6 +1075,7 @@ void Engine::add(const std::string& archivePath,
         }
         editor.addItems(pairs);
         editor.applyChanges();
+        invalidatePeelPath(archivePath);
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -955,9 +1102,22 @@ void Engine::remove(const std::string& archivePath,
             editor.deleteItem(index, DeletePolicy::RecurseDirs);
         }
         editor.applyChanges();
+        invalidatePeelPath(archivePath);
     } catch (const BitException& ex) {
         rethrow(ex);
     }
+}
+
+void Engine::retainNestedBlob(const std::string& archivePath,
+                              const std::vector<std::uint32_t>& nestIndices) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    adjustPeelHolders(archivePath, nestIndices, 1);
+}
+
+void Engine::releaseNestedBlob(const std::string& archivePath,
+                               const std::vector<std::uint32_t>& nestIndices) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    adjustPeelHolders(archivePath, nestIndices, -1);
 }
 
 std::string Engine::extensionForFormat(Format format) {

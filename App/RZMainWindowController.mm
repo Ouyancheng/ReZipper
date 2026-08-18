@@ -5,6 +5,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const unsigned long long RZPreviewMaxBytes = 128ull * 1024 * 1024;
+static const NSTimeInterval RZPreviewDebounce = 0.12;
 
 @interface RZFileTableView : NSTableView
 @property (nonatomic, copy, nullable) void (^spaceHandler)(void);
@@ -53,9 +54,12 @@ static NSString * const RZColMethod = @"method";
 @property (nonatomic, assign) BOOL busy;
 - (NSString *)askPassword:(NSString *)message;
 - (void)togglePreview:(id)sender;
+- (void)startPreviewExtract:(RZItem *)item token:(NSUInteger)token;
 @end
 
-@implementation RZMainWindowController
+@implementation RZMainWindowController {
+    rz::ProgressPtr _previewProgress;
+}
 
 - (instancetype)init {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1040, 643)
@@ -1258,27 +1262,36 @@ static NSString * const RZColMethod = @"method";
     return nil;
 }
 
+- (void)cancelPreviewWork {
+    self.previewToken++;
+    if (_previewProgress) {
+        _previewProgress->cancel.store(true, std::memory_order_relaxed);
+    }
+}
+
 - (RZPreviewController *)ensurePreviewController {
     if (!self.previewController) {
         self.previewController = [[RZPreviewController alloc] init];
         __weak RZMainWindowController *weakSelf = self;
         self.previewController.closeHandler = ^{
-            weakSelf.previewToken++;
+            [weakSelf cancelPreviewWork];
         };
-        self.previewController.keyHandler = ^(NSEvent *event) {
+        self.previewController.keyHandler = ^BOOL(NSEvent *event) {
             RZMainWindowController *strongSelf = weakSelf;
             if (!strongSelf) {
-                return;
+                return NO;
             }
             NSEventModifierFlags mods = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
             if (mods == 0 && event.charactersIgnoringModifiers.length == 1 &&
                 [event.charactersIgnoringModifiers characterAtIndex:0] == ' ') {
                 [strongSelf togglePreview:strongSelf];
-                return;
+                return YES;
             }
             if (event.keyCode == 125 || event.keyCode == 126) {
                 [strongSelf.tableView keyDown:event];
+                return YES;
             }
+            return NO;
         };
     }
     return self.previewController;
@@ -1287,7 +1300,7 @@ static NSString * const RZColMethod = @"method";
 - (void)togglePreview:(id)sender {
     (void)sender;
     if (self.previewController.window.isVisible) {
-        self.previewToken++;
+        [self cancelPreviewWork];
         [self.previewController close];
         [self.window makeFirstResponder:self.tableView];
         return;
@@ -1302,6 +1315,7 @@ static NSString * const RZColMethod = @"method";
 - (void)previewSelection {
     RZItem *item = [self previewableItem];
     RZPreviewController *preview = [self ensurePreviewController];
+    [self cancelPreviewWork];
     if (!item) {
         [preview showPlaceholder:@"Preview" message:@"Select a file to preview."];
         [preview presentRelativeTo:self.window];
@@ -1314,11 +1328,24 @@ static NSString * const RZColMethod = @"method";
         return;
     }
 
-    RZDocument *doc = self.archiveDocument;
     const NSUInteger token = ++self.previewToken;
     [preview showLoading:item.name];
     [preview presentRelativeTo:self.window];
+    __weak RZMainWindowController *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(RZPreviewDebounce * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        RZMainWindowController *strongSelf = weakSelf;
+        if (!strongSelf || token != strongSelf.previewToken) {
+            return;
+        }
+        [strongSelf startPreviewExtract:item token:token];
+    });
+}
 
+- (void)startPreviewExtract:(RZItem *)item token:(NSUInteger)token {
+    RZDocument *doc = self.archiveDocument;
+    auto progress = std::make_shared<rz::Progress>();
+    _previewProgress = progress;
     const std::uint32_t index = item.index;
     const std::string path = RZStd(doc.archiveFilePath);
     const std::string password = RZStd(doc.password);
@@ -1328,7 +1355,8 @@ static NSString * const RZColMethod = @"method";
         NSError *error = nil;
         NSData *data = nil;
         try {
-            const auto bytes = rz::Engine::instance().extractItem(path, index, password, nullptr, nest);
+            const auto bytes = rz::Engine::instance().extractItem(
+                path, index, password, progress, nest, RZPreviewMaxBytes);
             data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
         } catch (const std::exception& ex) {
             error = RZErrorFromException(ex);

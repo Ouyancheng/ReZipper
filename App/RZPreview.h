@@ -5,7 +5,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface RZPreviewController : NSWindowController
-@property (nonatomic, copy, nullable) void (^keyHandler)(NSEvent *event);
+@property (nonatomic, copy, nullable) BOOL (^keyHandler)(NSEvent *event);
 @property (nonatomic, copy, nullable) void (^closeHandler)(void);
 - (void)showLoading:(NSString *)name;
 - (void)showData:(NSData *)data name:(NSString *)name;
