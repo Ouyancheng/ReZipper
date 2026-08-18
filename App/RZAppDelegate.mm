@@ -128,6 +128,7 @@
     [archiveMenu addItem:[self rz_item:@"Extract To…" action:@selector(extract:) key:@"e" symbol:@"square.and.arrow.down" target:nil]];
     [archiveMenu addItem:[self rz_item:@"Test Archive" action:@selector(testArchive:) key:@"t" symbol:@"checkmark.seal" target:nil]];
     [archiveMenu addItem:[self rz_item:@"View Selection" action:@selector(viewSelection:) key:@"" symbol:@"eye" target:nil]];
+    [archiveMenu addItem:[self rz_item:@"Preview" action:@selector(togglePreview:) key:@"y" symbol:@"doc.text.magnifyingglass" target:nil]];
     [archiveMenu addItem:[NSMenuItem separatorItem]];
     [archiveMenu addItem:[self rz_item:@"Delete" action:@selector(deleteSelection:) key:@"" symbol:@"trash" target:nil]];
 
@@ -162,6 +163,7 @@
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"ReZipper";
     alert.informativeText = @"Open an archive to browse it like Finder. Use Add, Extract To, Test, View, and Delete in the toolbar — the same command layout as WinRAR, using macOS controls.\n\n"
+        @"Press Space (or ⌘Y) to preview the selected file in memory without unpacking the archive to disk.\n\n"
         @"Supported write formats: 7z, zip, tar, gz, bz2, xz, wim.\n"
         @"Read formats include those plus rar, iso, cab, dmg, and other 7-Zip handlers.";
     [alert runModal];

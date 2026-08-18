@@ -1,7 +1,30 @@
 #import "RZMainWindowController.h"
 #import "RZDocument.h"
+#import "RZPreview.h"
 #import "RZSheets.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+static const unsigned long long RZPreviewMaxBytes = 128ull * 1024 * 1024;
+
+@interface RZFileTableView : NSTableView
+@property (nonatomic, copy, nullable) void (^spaceHandler)(void);
+@end
+
+@implementation RZFileTableView
+
+- (void)keyDown:(NSEvent *)event {
+    NSEventModifierFlags mods = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (mods == 0 && event.charactersIgnoringModifiers.length == 1 &&
+        [event.charactersIgnoringModifiers characterAtIndex:0] == ' ') {
+        if (self.spaceHandler) {
+            self.spaceHandler();
+            return;
+        }
+    }
+    [super keyDown:event];
+}
+
+@end
 
 static NSString * const RZColName = @"name";
 static NSString * const RZColSize = @"size";
@@ -25,8 +48,11 @@ static NSString * const RZColMethod = @"method";
 @property (nonatomic, copy) NSArray<RZItem *> *visibleItems;
 @property (nonatomic, strong) RZProgressController *progressController;
 @property (nonatomic, strong) RZInfoController *infoController;
+@property (nonatomic, strong) RZPreviewController *previewController;
+@property (nonatomic, assign) NSUInteger previewToken;
 @property (nonatomic, assign) BOOL busy;
 - (NSString *)askPassword:(NSString *)message;
+- (void)togglePreview:(id)sender;
 @end
 
 @implementation RZMainWindowController
@@ -131,7 +157,7 @@ static NSString * const RZColMethod = @"method";
     tableScroll.borderType = NSNoBorder;
     tableScroll.drawsBackground = NO;
     tableScroll.automaticallyAdjustsContentInsets = YES;
-    NSTableView *table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    RZFileTableView *table = [[RZFileTableView alloc] initWithFrame:NSZeroRect];
     table.style = NSTableViewStyleInset;
     table.usesAlternatingRowBackgroundColors = NO;
     table.backgroundColor = NSColor.clearColor;
@@ -152,6 +178,10 @@ static NSString * const RZColMethod = @"method";
     [table registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     [table setDraggingSourceOperationMask:NSDragOperationCopy forLocal:NO];
     tableScroll.documentView = table;
+    __weak RZMainWindowController *weakSelf = self;
+    table.spaceHandler = ^{
+        [weakSelf togglePreview:weakSelf];
+    };
     self.tableView = table;
 
     NSButton *upButton = [NSButton buttonWithImage:[self rz_symbol:@"chevron.up" size:13]
@@ -706,6 +736,9 @@ static NSString * const RZColMethod = @"method";
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
     (void)notification;
     [self updateStatus];
+    if (self.previewController.window.isVisible) {
+        [self previewSelection];
+    }
 }
 
 - (void)tableDoubleClicked:(id)sender {
@@ -1214,6 +1247,113 @@ static NSString * const RZColMethod = @"method";
     }
     self.infoController = [[RZInfoController alloc] init];
     [self.infoController presentForDocument:self.document onWindow:self.window];
+}
+
+- (RZItem *)previewableItem {
+    for (RZItem *item in [self selectedItems]) {
+        if (!item.isDir && !item.isVirtual) {
+            return item;
+        }
+    }
+    return nil;
+}
+
+- (RZPreviewController *)ensurePreviewController {
+    if (!self.previewController) {
+        self.previewController = [[RZPreviewController alloc] init];
+        __weak RZMainWindowController *weakSelf = self;
+        self.previewController.closeHandler = ^{
+            weakSelf.previewToken++;
+        };
+        self.previewController.keyHandler = ^(NSEvent *event) {
+            RZMainWindowController *strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            NSEventModifierFlags mods = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+            if (mods == 0 && event.charactersIgnoringModifiers.length == 1 &&
+                [event.charactersIgnoringModifiers characterAtIndex:0] == ' ') {
+                [strongSelf togglePreview:strongSelf];
+                return;
+            }
+            if (event.keyCode == 125 || event.keyCode == 126) {
+                [strongSelf.tableView keyDown:event];
+            }
+        };
+    }
+    return self.previewController;
+}
+
+- (void)togglePreview:(id)sender {
+    (void)sender;
+    if (self.previewController.window.isVisible) {
+        self.previewToken++;
+        [self.previewController close];
+        [self.window makeFirstResponder:self.tableView];
+        return;
+    }
+    if (![self previewableItem]) {
+        NSBeep();
+        return;
+    }
+    [self previewSelection];
+}
+
+- (void)previewSelection {
+    RZItem *item = [self previewableItem];
+    RZPreviewController *preview = [self ensurePreviewController];
+    if (!item) {
+        [preview showPlaceholder:@"Preview" message:@"Select a file to preview."];
+        [preview presentRelativeTo:self.window];
+        return;
+    }
+    if (item.size > RZPreviewMaxBytes) {
+        [preview showPlaceholder:item.name
+                         message:@"This file is larger than 128 MB.\nPress Return to extract and open it."];
+        [preview presentRelativeTo:self.window];
+        return;
+    }
+
+    RZDocument *doc = self.archiveDocument;
+    const NSUInteger token = ++self.previewToken;
+    [preview showLoading:item.name];
+    [preview presentRelativeTo:self.window];
+
+    const std::uint32_t index = item.index;
+    const std::string path = RZStd(doc.archiveFilePath);
+    const std::string password = RZStd(doc.password);
+    const auto nest = doc.engineNestIndices;
+    NSString *name = item.name;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSData *data = nil;
+        try {
+            const auto bytes = rz::Engine::instance().extractItem(path, index, password, nullptr, nest);
+            data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+        } catch (const std::exception& ex) {
+            error = RZErrorFromException(ex);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (token != self.previewToken || !self.previewController.window.isVisible) {
+                return;
+            }
+            if (error) {
+                if (RZIsPasswordError(error)) {
+                    NSString *entered = [self askPassword:@"Enter the archive password to preview this file."];
+                    if (entered.length) {
+                        self.archiveDocument.password = entered;
+                        [self previewSelection];
+                    } else {
+                        [self.previewController showPlaceholder:name message:error.localizedDescription];
+                    }
+                    return;
+                }
+                [self.previewController showPlaceholder:name message:error.localizedDescription];
+                return;
+            }
+            [self.previewController showData:data name:name];
+        });
+    });
 }
 
 - (void)keyDown:(NSEvent *)event {

@@ -95,6 +95,13 @@ public:
                  const ProgressPtr& progress,
                  const std::vector<std::uint32_t>& nestIndices = {});
 
+    // Decompress one item into memory. Does not write the archive to disk.
+    std::vector<std::uint8_t> extractItem(const std::string& archivePath,
+                                          std::uint32_t index,
+                                          const std::string& password,
+                                          const ProgressPtr& progress,
+                                          const std::vector<std::uint32_t>& nestIndices = {});
+
     void test(const std::string& archivePath,
               const std::string& password,
               const ProgressPtr& progress,

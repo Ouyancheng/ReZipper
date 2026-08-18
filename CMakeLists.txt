@@ -85,6 +85,7 @@ set(APP_SOURCES
     App/RZCommon.mm
     App/RZDocument.mm
     App/RZMainWindowController.mm
+    App/RZPreview.mm
     App/RZSheets.mm
 )
 set(APP_RESOURCES
@@ -98,6 +99,7 @@ target_link_libraries(ReZipper PRIVATE
     rezipper_engine
     "-framework Cocoa"
     "-framework AppKit"
+    "-framework PDFKit"
     "-framework UniformTypeIdentifiers"
 )
 target_compile_options(ReZipper PRIVATE -fobjc-arc -fobjc-weak)

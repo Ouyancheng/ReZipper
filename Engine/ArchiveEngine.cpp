@@ -831,6 +831,31 @@ void Engine::extract(const std::string& archivePath,
     }
 }
 
+std::vector<std::uint8_t> Engine::extractItem(const std::string& archivePath,
+                                              std::uint32_t index,
+                                              const std::string& password,
+                                              const ProgressPtr& progress,
+                                              const std::vector<std::uint32_t>& nestIndices) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    try {
+        auto& lib = library(libraryPath_);
+        buffer_t blob;
+        if (!nestIndices.empty()) {
+            const buffer_t nested = peelNested(lib, archivePath, nestIndices, password);
+            BitArchiveReader reader{lib, nested, BitFormat::Auto, password};
+            attachProgress(reader, progress);
+            reader.extractTo(blob, index);
+        } else {
+            BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
+            attachProgress(reader, progress);
+            reader.extractTo(blob, index);
+        }
+        return {blob.begin(), blob.end()};
+    } catch (const BitException& ex) {
+        rethrow(ex);
+    }
+}
+
 void Engine::test(const std::string& archivePath,
                   const std::string& password,
                   const ProgressPtr& progress,
