@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iconv.h>
@@ -137,7 +138,7 @@ void attachProgress(BitAbstractArchiveHandler& handler, const ProgressPtr& progr
         return !progress->cancel.load(std::memory_order_relaxed);
     });
     handler.setFileCallback([progress](const tstring& file) {
-        progress->currentFile = file;
+        progress->setCurrentFile(file);
     });
 }
 
@@ -182,36 +183,128 @@ uint64_t rz_u64(const char* p) {
     return static_cast<uint64_t>(rz_u32(p)) | (static_cast<uint64_t>(rz_u32(p + 4)) << 32);
 }
 
+int32_t rz_i32(const char* p) {
+    return static_cast<int32_t>(rz_u32(p));
+}
+
+constexpr uint64_t kZipCdRecordSize = 46;
+constexpr uint64_t kZipMaxCdSize = 64ull * 1024 * 1024;
+
 struct ZipCdName {
     std::string raw;
     bool utf8 = false;
+    std::int64_t mtimeUnix = 0;
 };
+
+// DOS stamps are local time by definition, so this needs mktime rather than
+// plain arithmetic. Callers memoize it: archives repeat few distinct stamps.
+// tm_isdst = -1 resolves each stamp with the offset in effect on that date,
+// which is why results differ from 7-Zip's by an hour in DST zones: 7-Zip
+// applies today's offset to every entry, dating winter files an hour early.
+std::int64_t dosToUnix(uint32_t dosDateTime) {
+    const int seconds = static_cast<int>(dosDateTime & 0x1F) * 2;
+    const int minutes = static_cast<int>((dosDateTime >> 5) & 0x3F);
+    const int hours = static_cast<int>((dosDateTime >> 11) & 0x1F);
+    const int day = static_cast<int>((dosDateTime >> 16) & 0x1F);
+    const int month = static_cast<int>((dosDateTime >> 21) & 0x0F);
+    const int year = static_cast<int>((dosDateTime >> 25) & 0x7F) + 1980;
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+        return 0;
+    }
+    std::tm parts{};
+    parts.tm_sec = seconds;
+    parts.tm_min = minutes;
+    parts.tm_hour = hours;
+    parts.tm_mday = day;
+    parts.tm_mon = month - 1;
+    parts.tm_year = year - 1900;
+    parts.tm_isdst = -1;
+    const std::time_t stamp = std::mktime(&parts);
+    return stamp == static_cast<std::time_t>(-1) ? 0 : static_cast<std::int64_t>(stamp);
+}
+
+std::int64_t filetimeToUnix(uint64_t filetime) {
+    constexpr uint64_t kTicksPerSecond = 10000000ull;
+    constexpr std::int64_t kEpochDelta = 11644473600ll;
+    return static_cast<std::int64_t>(filetime / kTicksPerSecond) - kEpochDelta;
+}
+
+// An extended timestamp beats the DOS stamp: it is UTC with at least one-second
+// precision, while the DOS stamp is local time rounded to two seconds.
+bool extraFieldMtime(const char* extra, size_t length, std::int64_t& mtime) {
+    size_t pos = 0;
+    while (pos + 4 <= length) {
+        const uint16_t id = rz_u16(extra + pos);
+        const uint16_t size = rz_u16(extra + pos + 2);
+        if (pos + 4 + size > length) {
+            break;
+        }
+        const char* data = extra + pos + 4;
+        // 0x5455 "UT": flags byte, then mtime/atime/ctime as int32 Unix seconds.
+        if (id == 0x5455 && size >= 5 && (static_cast<unsigned char>(data[0]) & 0x01) != 0) {
+            mtime = rz_i32(data + 1);
+            return true;
+        }
+        // 0x000A "NTFS": reserved dword, then tag/size pairs; tag 1 holds FILETIMEs.
+        if (id == 0x000A && size >= 12) {
+            size_t inner = 4;
+            while (inner + 4 <= size) {
+                const uint16_t tag = rz_u16(data + inner);
+                const uint16_t tagSize = rz_u16(data + inner + 2);
+                if (inner + 4 + tagSize > size) {
+                    break;
+                }
+                if (tag == 1 && tagSize >= 8) {
+                    mtime = filetimeToUnix(rz_u64(data + inner + 4));
+                    return true;
+                }
+                inner += 4 + tagSize;
+            }
+        }
+        pos += 4 + size;
+    }
+    return false;
+}
 
 std::vector<ZipCdName> parseZipCdRecords(const char* cd, uint64_t cdSize, uint64_t nent) {
     if (!cd || nent == 0 || cdSize == 0) {
         return {};
     }
+    // nent comes straight from the archive, so cap it by what can physically
+    // fit in the central directory before using it to size the vector.
+    nent = std::min(nent, cdSize / kZipCdRecordSize);
     std::vector<ZipCdName> names;
     names.reserve(static_cast<size_t>(nent));
+    std::unordered_map<uint32_t, std::int64_t> dosCache;
     size_t pos = 0;
-    while (pos + 46 <= cdSize && names.size() < nent) {
+    while (pos + kZipCdRecordSize <= cdSize && names.size() < nent) {
         if (cd[pos] != 'P' || cd[pos + 1] != 'K' ||
             static_cast<unsigned char>(cd[pos + 2]) != 1 ||
             static_cast<unsigned char>(cd[pos + 3]) != 2) {
             break;
         }
         const uint16_t flags = rz_u16(cd + pos + 8);
+        const uint32_t dosStamp = rz_u32(cd + pos + 12);
         const uint16_t nameLen = rz_u16(cd + pos + 28);
         const uint16_t extraLen = rz_u16(cd + pos + 30);
         const uint16_t commentLen = rz_u16(cd + pos + 32);
-        if (pos + 46 + nameLen + extraLen + commentLen > cdSize) {
+        if (pos + kZipCdRecordSize + nameLen + extraLen + commentLen > cdSize) {
             break;
         }
         ZipCdName entry;
-        entry.raw.assign(cd + pos + 46, nameLen);
+        entry.raw.assign(cd + pos + kZipCdRecordSize, nameLen);
         entry.utf8 = (flags & 0x800) != 0;
+        if (!extraFieldMtime(cd + pos + kZipCdRecordSize + nameLen, extraLen, entry.mtimeUnix)) {
+            const auto cached = dosCache.find(dosStamp);
+            if (cached != dosCache.end()) {
+                entry.mtimeUnix = cached->second;
+            } else {
+                entry.mtimeUnix = dosToUnix(dosStamp);
+                dosCache.emplace(dosStamp, entry.mtimeUnix);
+            }
+        }
         names.push_back(std::move(entry));
-        pos += 46 + nameLen + extraLen + commentLen;
+        pos += kZipCdRecordSize + nameLen + extraLen + commentLen;
     }
     return names;
 }
@@ -273,11 +366,15 @@ std::vector<ZipCdName> parseZipCentralNames(const char* data, uint64_t fileSize)
         return {};
     }
     if (zip64Off != UINT64_MAX) {
-        if (zip64Off + 56 > fileSize || !applyZip64Eocd(data + zip64Off, nent, cdSize, cdOff)) {
+        // Both offsets are archive-controlled, so compare by subtraction:
+        // zip64Off + 56 and cdOff + cdSize can each wrap past UINT64_MAX.
+        if (fileSize < 56 || zip64Off > fileSize - 56 ||
+            !applyZip64Eocd(data + zip64Off, nent, cdSize, cdOff)) {
             return {};
         }
     }
-    if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
+    if (nent == 0 || cdSize == 0 || cdSize > kZipMaxCdSize || cdOff > fileSize ||
+        cdSize > fileSize - cdOff) {
         return {};
     }
     return parseZipCdRecords(data + cdOff, cdSize, nent);
@@ -310,6 +407,9 @@ std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
         return {};
     }
     if (zip64Off != UINT64_MAX) {
+        if (fileSize < 56 || zip64Off > fileSize - 56) {
+            return {};
+        }
         std::vector<char> z64(56);
         file.clear();
         file.seekg(static_cast<std::streamoff>(zip64Off));
@@ -318,7 +418,8 @@ std::vector<ZipCdName> readZipCentralNames(const std::string& path) {
             return {};
         }
     }
-    if (nent == 0 || cdSize == 0 || cdOff + cdSize > fileSize || cdSize > 64 * 1024 * 1024) {
+    if (nent == 0 || cdSize == 0 || cdSize > kZipMaxCdSize || cdOff > fileSize ||
+        cdSize > fileSize - cdOff) {
         return {};
     }
 
@@ -575,10 +676,21 @@ const char* detectLegacyEncoding(const std::vector<std::string>& rawNames) {
     return best;
 }
 
-std::unordered_map<std::uint32_t, std::string> zipDecodedPathsFromEntries(
-    const std::vector<ZipCdName>& entries) {
+struct ZipEntryMeta {
+    std::string path;
+    bool hasPath = false;
+    std::int64_t mtimeUnix = 0;
+};
+
+struct ZipMeta {
+    std::unordered_map<std::uint32_t, ZipEntryMeta> entries;
+    std::uint32_t recordCount = 0;
+};
+
+ZipMeta zipMetaFromEntries(const std::vector<ZipCdName>& entries) {
+    ZipMeta meta;
     if (entries.empty()) {
-        return {};
+        return meta;
     }
     std::vector<std::string> legacy;
     for (const auto& entry : entries) {
@@ -587,50 +699,62 @@ std::unordered_map<std::uint32_t, std::string> zipDecodedPathsFromEntries(
         }
     }
     const char* encoding = detectLegacyEncoding(legacy);
-    std::unordered_map<std::uint32_t, std::string> names;
+    meta.recordCount = static_cast<std::uint32_t>(entries.size());
+    meta.entries.reserve(entries.size());
     for (std::uint32_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
+        ZipEntryMeta info;
+        info.mtimeUnix = entry.mtimeUnix;
         std::optional<std::string> decoded;
         if (entry.utf8 || isValidUtf8(entry.raw)) {
             decoded = entry.raw;
         } else if (encoding) {
             decoded = iconvToUtf8(entry.raw, encoding);
         }
-        if (!decoded || decoded->empty()) {
-            continue;
+        if (decoded && !decoded->empty()) {
+            info.path = posixPath(*decoded);
+            info.hasPath = !info.path.empty();
         }
-        names[i] = posixPath(*decoded);
+        meta.entries.emplace(i, std::move(info));
     }
-    return names;
+    return meta;
 }
 
-std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const std::string& archivePath) {
-    return zipDecodedPathsFromEntries(readZipCentralNames(archivePath));
+ZipMeta zipMeta(const std::string& archivePath) {
+    return zipMetaFromEntries(readZipCentralNames(archivePath));
 }
 
-std::unordered_map<std::uint32_t, std::string> zipDecodedPaths(const buffer_t& blob) {
+ZipMeta zipMeta(const buffer_t& blob) {
     if (blob.empty()) {
         return {};
     }
-    return zipDecodedPathsFromEntries(parseZipCentralNames(
+    return zipMetaFromEntries(parseZipCentralNames(
         reinterpret_cast<const char*>(blob.data()), blob.size()));
 }
 
-void applyZipNames(std::vector<Item>& items, const std::unordered_map<std::uint32_t, std::string>& names) {
-    if (names.empty()) {
+void applyZipMeta(std::vector<Item>& items, const ZipMeta& meta, bool applyMtime) {
+    if (meta.entries.empty()) {
         return;
     }
     for (auto& item : items) {
-        const auto it = names.find(item.index);
-        if (it == names.end()) {
+        const auto it = meta.entries.find(item.index);
+        if (it == meta.entries.end()) {
             continue;
         }
-        item.path = it->second;
-        item.name = leafName(item.path);
+        if (it->second.hasPath) {
+            item.path = it->second.path;
+            item.name = leafName(item.path);
+        }
+        if (applyMtime) {
+            item.mtimeUnix = it->second.mtimeUnix;
+        }
     }
 }
 
-Item itemFromInfo(const BitArchiveItemInfo& info) {
+// wantMtime is false for zips: BitArchiveItem::lastWriteTime() costs ~70us per
+// item on archives whose only timestamp is the DOS stamp, which dwarfs the rest
+// of listing. Those come from the central directory we already parse instead.
+Item itemFromInfo(const BitArchiveItem& info, bool wantMtime) {
     Item item;
     item.index = info.index();
     item.path = posixPath(info.path());
@@ -643,12 +767,14 @@ Item itemFromInfo(const BitArchiveItemInfo& info) {
     item.packedSize = info.packSize();
     item.crc = info.crc();
     item.encrypted = info.isEncrypted();
-    try {
-        const auto mtime = info.lastWriteTime();
-        item.mtimeUnix = static_cast<std::int64_t>(
-            std::chrono::system_clock::to_time_t(mtime));
-    } catch (...) {
-        item.mtimeUnix = 0;
+    if (wantMtime) {
+        try {
+            const auto mtime = info.lastWriteTime();
+            item.mtimeUnix = static_cast<std::int64_t>(
+                std::chrono::system_clock::to_time_t(mtime));
+        } catch (...) {
+            item.mtimeUnix = 0;
+        }
     }
     try {
         const auto method = info.itemProperty(BitProperty::Method);
@@ -694,37 +820,51 @@ std::string joinArchivePath(const std::string& folder, const std::string& name) 
     return folder + "/" + name;
 }
 
-ArchiveInfo fillInfo(BitArchiveReader& reader, const std::string& path, bool canUpdate) {
+ArchiveInfo fillInfo(BitArchiveReader& reader, const std::string& path, bool canUpdate,
+                     bool wantMtime) {
     ArchiveInfo info;
     info.path = path;
     info.formatName = nameFromBit(reader.detectedFormat());
     info.format = formatFromBit(reader.detectedFormat());
     info.canUpdate = canUpdate && writableFormat(reader.detectedFormat()) != nullptr;
-    info.encrypted = reader.hasEncryptedItems() || reader.isEncrypted();
     info.solid = reader.isSolid();
-    info.fileCount = reader.filesCount();
-    info.folderCount = reader.foldersCount();
-    info.totalSize = reader.size();
-    info.packedSize = reader.packSize();
     info.items.reserve(reader.itemsCount());
-    for (const auto& entry : reader.items()) {
-        info.items.push_back(itemFromInfo(entry));
+    // One pass: bit7z computes each of these aggregates by walking every item
+    // again, so folding them in here saves five extra traversals. Iterating the
+    // reader directly also matters, because reader.items() eagerly reads all
+    // ~95 properties per item, including the expensive timestamp.
+    bool anyEncrypted = false;
+    for (auto it = reader.begin(); it != reader.end(); ++it) {
+        Item item = itemFromInfo(*it, wantMtime);
+        if (item.isDir) {
+            info.folderCount += 1;
+        } else {
+            info.fileCount += 1;
+            info.totalSize += item.size;
+            info.packedSize += item.packedSize;
+            anyEncrypted = anyEncrypted || item.encrypted;
+        }
+        info.items.push_back(std::move(item));
+    }
+    info.encrypted = anyEncrypted || reader.isEncrypted();
+    return info;
+}
+
+// The central directory is only read for zips, and only trusted for timestamps
+// when it describes every item the reader reports.
+ArchiveInfo listFromReader(BitArchiveReader& reader, const std::string& path, bool canUpdate,
+                           const ZipMeta& meta) {
+    const bool isZip = formatFromBit(reader.detectedFormat()) == Format::Zip;
+    const bool metaCoversAll = isZip && meta.recordCount == reader.itemsCount();
+    ArchiveInfo info = fillInfo(reader, path, canUpdate, !metaCoversAll);
+    if (isZip) {
+        applyZipMeta(info.items, meta, metaCoversAll);
     }
     return info;
 }
 
-void remapZipNames(ArchiveInfo& info, const std::unordered_map<std::uint32_t, std::string>& names) {
-    if (info.format == Format::Zip) {
-        applyZipNames(info.items, names);
-    }
-}
-
-template <typename Source>
-std::unordered_map<std::uint32_t, std::string> zipNamesIfZip(BitArchiveReader& reader, const Source& source) {
-    if (formatFromBit(reader.detectedFormat()) != Format::Zip) {
-        return {};
-    }
-    return zipDecodedPaths(source);
+bool readerIsZip(BitArchiveReader& reader) {
+    return formatFromBit(reader.detectedFormat()) == Format::Zip;
 }
 
 bool extractCancelled(const ProgressPtr& progress) {
@@ -751,8 +891,10 @@ buffer_t extractCapped(BitArchiveReader& reader,
         reader.extractTo(blob, index);
         return blob;
     }
-    if (maxBytes > 0 && reported > 0) {
-        blob.reserve(static_cast<size_t>(std::min(reported, maxBytes)));
+    // Without this the streaming path below regrows the buffer repeatedly,
+    // which is costly when peeling a large nested archive into memory.
+    if (reported > 0) {
+        blob.reserve(static_cast<size_t>(maxBytes > 0 ? std::min(reported, maxBytes) : reported));
     }
     bool overflow = false;
     try {
@@ -823,9 +965,40 @@ struct PeelEntry {
     std::uint64_t fileMtime = 0;
     std::shared_ptr<buffer_t> blob;
     int holders = 0;
+    std::uint64_t lastUsed = 0;
 };
 
 std::map<PeelKey, PeelEntry> gPeelCache;
+std::uint64_t gPeelClock = 0;
+
+// Peeled blobs are whole decompressed archives, so the cache needs a ceiling.
+// Entries an open document still holds are never evicted.
+constexpr std::uint64_t kPeelCacheBudget = 512ull * 1024 * 1024;
+
+void trimPeelCache() {
+    std::uint64_t total = 0;
+    for (const auto& entry : gPeelCache) {
+        if (entry.second.blob) {
+            total += entry.second.blob->size();
+        }
+    }
+    while (total > kPeelCacheBudget) {
+        auto victim = gPeelCache.end();
+        for (auto it = gPeelCache.begin(); it != gPeelCache.end(); ++it) {
+            if (it->second.holders > 0 || !it->second.blob) {
+                continue;
+            }
+            if (victim == gPeelCache.end() || it->second.lastUsed < victim->second.lastUsed) {
+                victim = it;
+            }
+        }
+        if (victim == gPeelCache.end()) {
+            break;
+        }
+        total -= victim->second.blob->size();
+        gPeelCache.erase(victim);
+    }
+}
 
 void peelIdentity(const std::string& path, std::uint64_t& size, std::uint64_t& mtime) {
     std::error_code ec;
@@ -867,6 +1040,7 @@ std::shared_ptr<buffer_t> cachedPeel(const Bit7zLibrary& lib,
         it->second.password == password &&
         it->second.fileSize == size &&
         it->second.fileMtime == mtime) {
+        it->second.lastUsed = ++gPeelClock;
         return it->second.blob;
     }
     if (it != gPeelCache.end()) {
@@ -879,6 +1053,8 @@ std::shared_ptr<buffer_t> cachedPeel(const Bit7zLibrary& lib,
     entry.fileSize = size;
     entry.fileMtime = mtime;
     entry.blob = blob;
+    entry.lastUsed = ++gPeelClock;
+    trimPeelCache();
     return blob;
 }
 
@@ -921,15 +1097,13 @@ ArchiveInfo Engine::list(const std::string& archivePath,
         auto& lib = library(libraryPath_);
         if (nestIndices.empty()) {
             BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
-            ArchiveInfo info = fillInfo(reader, archivePath, true);
-            remapZipNames(info, zipDecodedPaths(archivePath));
-            return info;
+            return listFromReader(reader, archivePath, true,
+                                  readerIsZip(reader) ? zipMeta(archivePath) : ZipMeta{});
         }
         const auto blob = cachedPeel(lib, archivePath, nestIndices, password);
         BitArchiveReader reader{lib, *blob, BitFormat::Auto, password};
-        ArchiveInfo info = fillInfo(reader, archivePath, false);
-        remapZipNames(info, zipDecodedPaths(*blob));
-        return info;
+        return listFromReader(reader, archivePath, false,
+                              readerIsZip(reader) ? zipMeta(*blob) : ZipMeta{});
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -945,15 +1119,16 @@ void Engine::extract(const std::string& archivePath,
     try {
         auto& lib = library(libraryPath_);
         fs::create_directories(destination);
-        auto extractMapped = [&](BitArchiveReader& reader,
-                                 const std::unordered_map<std::uint32_t, std::string>& zipNames) {
+        auto extractMapped = [&](BitArchiveReader& reader, const ZipMeta& meta) {
             std::unordered_set<std::uint32_t> wanted(indices.begin(), indices.end());
             reader.extractTo(destination, [&](const BitArchiveItem& item) -> tstring {
                 if (!wanted.empty() && wanted.find(item.index()) == wanted.end()) {
                     return {};
                 }
-                const auto it = zipNames.find(item.index());
-                const std::string path = it != zipNames.end() ? it->second : posixPath(item.path());
+                const auto it = meta.entries.find(item.index());
+                const std::string path = (it != meta.entries.end() && it->second.hasPath)
+                                             ? it->second.path
+                                             : posixPath(item.path());
                 if (path.empty()) {
                     return {};
                 }
@@ -965,13 +1140,13 @@ void Engine::extract(const std::string& archivePath,
             BitArchiveReader reader{lib, *blob, BitFormat::Auto, password};
             reader.setOverwriteMode(OverwriteMode::Overwrite);
             attachProgress(reader, progress);
-            extractMapped(reader, zipNamesIfZip(reader, *blob));
+            extractMapped(reader, readerIsZip(reader) ? zipMeta(*blob) : ZipMeta{});
             return;
         }
         BitArchiveReader reader{lib, archivePath, BitFormat::Auto, password};
         reader.setOverwriteMode(OverwriteMode::Overwrite);
         attachProgress(reader, progress);
-        extractMapped(reader, zipNamesIfZip(reader, archivePath));
+        extractMapped(reader, readerIsZip(reader) ? zipMeta(archivePath) : ZipMeta{});
     } catch (const BitException& ex) {
         rethrow(ex);
     }
@@ -1034,6 +1209,8 @@ void Engine::create(const std::string& archivePath,
         throw EngineError("No files selected to compress");
     }
     std::lock_guard<std::mutex> lock(gMutex);
+    std::error_code existsEc;
+    const bool existedBefore = fs::exists(archivePath, existsEc);
     try {
         auto& lib = library(libraryPath_);
         const auto& format = inoutFormat(options.format);
@@ -1044,6 +1221,14 @@ void Engine::create(const std::string& archivePath,
         compressor.compress(inputPaths, archivePath);
         invalidatePeelPath(archivePath);
     } catch (const BitException& ex) {
+        // A cancelled compression leaves a truncated archive behind. Only
+        // remove it when we know we created it, so an existing archive the
+        // user was replacing is never deleted on our way out.
+        if (!existedBefore && progress && progress->cancel.load(std::memory_order_relaxed)) {
+            std::error_code ec;
+            fs::remove(archivePath, ec);
+        }
+        invalidatePeelPath(archivePath);
         rethrow(ex);
     }
 }

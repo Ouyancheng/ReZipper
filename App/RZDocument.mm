@@ -9,6 +9,7 @@ static void RZAddVirtualFolders(RZFolderNode *node,
             RZItem *folder = [[RZItem alloc] init];
             folder.isDir = YES;
             folder.isVirtual = YES;
+            folder.index = RZInvalidIndex;
             folder.name = child.name;
             folder.path = child.path;
             folder.method = @"";

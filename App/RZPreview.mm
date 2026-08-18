@@ -2,6 +2,11 @@
 #import <PDFKit/PDFKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+// +stringEncodingForData: costs roughly a second per megabyte on non-UTF-8
+// input, and no one reads a 128 MB file in a preview pane, so cap what is fed
+// to it. The cap is on the decoded prefix only; the file itself is untouched.
+static const NSUInteger RZPreviewTextMaxBytes = 2u * 1024 * 1024;
+
 static NSString *RZDecodePreviewText(NSData *data) {
     if (data.length == 0) {
         return @"";
@@ -17,21 +22,32 @@ static NSString *RZDecodePreviewText(NSData *data) {
     if (utf8) {
         return utf8;
     }
-    NSString *decoded = nil;
-    (void)[NSString stringEncodingForData:data
-                          encodingOptions:@{
-                              NSStringEncodingDetectionSuggestedEncodingsKey: @[
-                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)),
-                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGBK_95)),
-                                  @(NSShiftJISStringEncoding),
-                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingBig5)),
-                                  @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingEUC_KR)),
-                                  @(NSISOLatin1StringEncoding),
-                              ],
-                              NSStringEncodingDetectionUseOnlySuggestedEncodingsKey: @NO,
-                          }
-                          convertedString:&decoded
-                      usedLossyConversion:NULL];
+    // Detection is the expensive step and scales with input length, so run it
+    // on a sample and reuse the answer to decode the rest cheaply.
+    static const NSUInteger kDetectSampleBytes = 64u * 1024;
+    NSData *sample = data.length > kDetectSampleBytes
+        ? [data subdataWithRange:NSMakeRange(0, kDetectSampleBytes)]
+        : data;
+    NSString *sampleText = nil;
+    NSStringEncoding encoding =
+        [NSString stringEncodingForData:sample
+                        encodingOptions:@{
+                            NSStringEncodingDetectionSuggestedEncodingsKey: @[
+                                @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)),
+                                @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGBK_95)),
+                                @(NSShiftJISStringEncoding),
+                                @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingBig5)),
+                                @(CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingEUC_KR)),
+                                @(NSISOLatin1StringEncoding),
+                            ],
+                            NSStringEncodingDetectionUseOnlySuggestedEncodingsKey: @NO,
+                        }
+                        convertedString:&sampleText
+                    usedLossyConversion:NULL];
+    NSString *decoded = encoding != 0 ? [[NSString alloc] initWithData:data encoding:encoding] : nil;
+    if (decoded.length == 0) {
+        decoded = sampleText;
+    }
     if (decoded.length == 0) {
         return nil;
     }
@@ -47,6 +63,100 @@ static NSString *RZDecodePreviewText(NSData *data) {
     }
     return decoded;
 }
+
+typedef NS_ENUM(NSInteger, RZPreviewKind) {
+    RZPreviewKindNone = 0,
+    RZPreviewKindImage,
+    RZPreviewKindPDF,
+    RZPreviewKindRTF,
+    RZPreviewKindText,
+};
+
+@interface RZPreviewContent ()
+@property (nonatomic, assign) RZPreviewKind kind;
+@property (nonatomic, strong, nullable) NSImage *image;
+@property (nonatomic, strong, nullable) PDFDocument *pdf;
+@property (nonatomic, strong, nullable) NSData *rtfData;
+@property (nonatomic, strong, nullable) NSAttributedString *text;
+@end
+
+@implementation RZPreviewContent
+
++ (NSDictionary *)textAttributes {
+    return @{
+        NSFontAttributeName: [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName: NSColor.labelColor,
+    };
+}
+
++ (instancetype)contentForData:(NSData *)data name:(NSString *)name {
+    RZPreviewContent *content = [[RZPreviewContent alloc] init];
+    content.kind = RZPreviewKindNone;
+    if (data.length == 0) {
+        return content;
+    }
+
+    NSString *ext = name.pathExtension;
+    UTType *type = ext.length ? [UTType typeWithFilenameExtension:ext] : nil;
+
+    if (!type || [type conformsToType:UTTypeImage]) {
+        NSImage *image = [[NSImage alloc] initWithData:data];
+        if (image && image.size.width > 0 && image.size.height > 0) {
+            content.kind = RZPreviewKindImage;
+            content.image = image;
+            return content;
+        }
+        if (type && [type conformsToType:UTTypeImage]) {
+            return content;
+        }
+    }
+
+    if ([type conformsToType:UTTypePDF] || [[ext lowercaseString] isEqualToString:@"pdf"]) {
+        PDFDocument *pdf = [[PDFDocument alloc] initWithData:data];
+        if (pdf.pageCount > 0) {
+            content.kind = RZPreviewKindPDF;
+            content.pdf = pdf;
+        }
+        return content;
+    }
+
+    // The AppKit RTF importer is not documented as thread-safe, so hand the
+    // bytes to the main thread instead of parsing them here.
+    if ([type conformsToType:UTTypeRTF]) {
+        content.kind = RZPreviewKindRTF;
+        content.rtfData = data;
+        return content;
+    }
+
+    const BOOL looksText = !type ||
+        [type conformsToType:UTTypeText] ||
+        [type conformsToType:UTTypeSourceCode] ||
+        [type conformsToType:UTTypeJSON] ||
+        [type conformsToType:UTTypeXML] ||
+        [type conformsToType:UTTypeHTML];
+    if (!looksText) {
+        return content;
+    }
+
+    const BOOL truncated = data.length > RZPreviewTextMaxBytes;
+    NSData *head = truncated ? [data subdataWithRange:NSMakeRange(0, RZPreviewTextMaxBytes)] : data;
+    NSString *decoded = RZDecodePreviewText(head);
+    if (decoded.length == 0) {
+        return content;
+    }
+    if (truncated) {
+        decoded = [decoded stringByAppendingFormat:
+            @"\n\n… preview truncated at %lu MB of %llu MB. Press Return to open the whole file.",
+            (unsigned long)(RZPreviewTextMaxBytes / (1024 * 1024)),
+            (unsigned long long)(data.length / (1024 * 1024))];
+    }
+    content.kind = RZPreviewKindText;
+    content.text = [[NSAttributedString alloc] initWithString:decoded
+                                                   attributes:[self textAttributes]];
+    return content;
+}
+
+@end
 
 @interface RZPreviewPanel : NSPanel
 @property (nonatomic, copy, nullable) BOOL (^keyHandler)(NSEvent *event);
@@ -219,68 +329,40 @@ static NSString *RZDecodePreviewText(NSData *data) {
     [self pin:scroll];
 }
 
-- (BOOL)tryShowData:(NSData *)data name:(NSString *)name {
-    NSString *ext = name.pathExtension;
-    UTType *type = ext.length ? [UTType typeWithFilenameExtension:ext] : nil;
-
-    if (!type || [type conformsToType:UTTypeImage]) {
-        NSImage *image = [[NSImage alloc] initWithData:data];
-        if (image && image.size.width > 0 && image.size.height > 0) {
-            [self showImage:image];
-            return YES;
-        }
-        if (type && [type conformsToType:UTTypeImage]) {
-            return NO;
-        }
-    }
-
-    if ([type conformsToType:UTTypePDF] || [[ext lowercaseString] isEqualToString:@"pdf"]) {
-        PDFDocument *pdf = [[PDFDocument alloc] initWithData:data];
-        if (pdf.pageCount > 0) {
-            [self showPDF:pdf];
-            return YES;
-        }
-        return NO;
-    }
-
-    if ([type conformsToType:UTTypeRTF]) {
-        NSAttributedString *rtf = [[NSAttributedString alloc] initWithRTF:data documentAttributes:nil];
+- (BOOL)tryShowContent:(RZPreviewContent *)content {
+    switch (content.kind) {
+    case RZPreviewKindImage:
+        [self showImage:content.image];
+        return YES;
+    case RZPreviewKindPDF:
+        [self showPDF:content.pdf];
+        return YES;
+    case RZPreviewKindRTF: {
+        NSAttributedString *rtf = [[NSAttributedString alloc] initWithRTF:content.rtfData
+                                                       documentAttributes:nil];
         if (rtf.length) {
             [self showText:rtf];
             return YES;
         }
-    }
-
-    const BOOL looksText = !type ||
-        [type conformsToType:UTTypeText] ||
-        [type conformsToType:UTTypeSourceCode] ||
-        [type conformsToType:UTTypeJSON] ||
-        [type conformsToType:UTTypeXML] ||
-        [type conformsToType:UTTypeHTML];
-    if (!looksText) {
         return NO;
     }
-
-    NSString *decoded = RZDecodePreviewText(data);
-    if (decoded.length == 0) {
-        return NO;
+    case RZPreviewKindText:
+        [self showText:content.text];
+        return YES;
+    case RZPreviewKindNone:
+        break;
     }
-    NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: NSColor.labelColor,
-    };
-    [self showText:[[NSAttributedString alloc] initWithString:decoded attributes:attrs]];
-    return YES;
+    return NO;
 }
 
-- (void)showData:(NSData *)data name:(NSString *)name {
+- (void)showContent:(RZPreviewContent *)content name:(NSString *)name {
     self.window.title = name.length ? name : @"Preview";
     [self clearContent];
-    if (data.length == 0) {
+    if (!content) {
         [self showPlaceholder:name message:@"This file is empty."];
         return;
     }
-    if (![self tryShowData:data name:name]) {
+    if (![self tryShowContent:content]) {
         [self showPlaceholder:name message:@"No in-memory preview for this file.\nPress Return to open it, which extracts this item only."];
     }
 }

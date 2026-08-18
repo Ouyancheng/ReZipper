@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -60,7 +61,22 @@ struct Progress {
     std::atomic<std::uint64_t> total{0};
     std::atomic<std::uint64_t> processed{0};
     std::atomic<bool> cancel{false};
-    std::string currentFile; // written from worker; read from UI with care
+
+    // Written by the worker thread, polled by the UI thread, so the string
+    // itself must never be touched by both at once.
+    void setCurrentFile(const std::string& file) {
+        std::lock_guard<std::mutex> lock(fileMutex_);
+        currentFile_ = file;
+    }
+
+    std::string takeCurrentFile() const {
+        std::lock_guard<std::mutex> lock(fileMutex_);
+        return currentFile_;
+    }
+
+private:
+    mutable std::mutex fileMutex_;
+    std::string currentFile_;
 };
 
 using ProgressPtr = std::shared_ptr<Progress>;

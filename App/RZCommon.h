@@ -33,6 +33,10 @@ static inline BOOL RZIsPasswordError(NSError * _Nullable error) {
     return error && [error.domain isEqualToString:@"app.rezipper"] && error.code == 2;
 }
 
+// Folders synthesized for zips that omit directory entries. They have no
+// archive index, so callers must filter them out before extracting by index.
+static const std::uint32_t RZInvalidIndex = UINT32_MAX;
+
 @interface RZItem : NSObject
 @property (nonatomic, assign) std::uint32_t index;
 @property (nonatomic, copy) NSString *path;

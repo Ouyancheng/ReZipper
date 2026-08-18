@@ -27,6 +27,56 @@ static const NSTimeInterval RZPreviewDebounce = 0.12;
 
 @end
 
+// Rebuilding these per cell dominated scrolling: the icon lookup alone cost
+// ~44us, the date formatter ~16us, against a ~8ms frame budget.
+static NSByteCountFormatter *RZByteFormatter(void) {
+    static NSByteCountFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatter = [[NSByteCountFormatter alloc] init];
+        formatter.countStyle = NSByteCountFormatterCountStyleFile;
+    });
+    return formatter;
+}
+
+static NSDateFormatter *RZDateFormatter(void) {
+    static NSDateFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.dateStyle = NSDateFormatterMediumStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+    });
+    return formatter;
+}
+
+static NSImage *RZIconForExtension(NSString *extension) {
+    static NSMutableDictionary<NSString *, NSImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+    NSString *key = extension.lowercaseString ?: @"";
+    NSImage *icon = cache[key];
+    if (!icon) {
+        UTType *type = key.length ? [UTType typeWithFilenameExtension:key] : nil;
+        icon = [[NSWorkspace sharedWorkspace] iconForContentType:type ?: UTTypeData];
+        if (icon) {
+            cache[key] = icon;
+        }
+    }
+    return icon;
+}
+
+static NSImage *RZFolderIcon(void) {
+    static NSImage *icon;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        icon = [NSImage imageWithSystemSymbolName:@"folder.fill" accessibilityDescription:@"Folder"];
+    });
+    return icon;
+}
+
 static NSString * const RZColName = @"name";
 static NSString * const RZColSize = @"size";
 static NSString * const RZColPacked = @"packed";
@@ -46,6 +96,7 @@ static NSString * const RZColMethod = @"method";
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSTextField *sizeLabel;
 @property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, copy, nullable) NSString *renderedCrumbSignature;
 @property (nonatomic, copy) NSArray<RZItem *> *visibleItems;
 @property (nonatomic, strong) RZProgressController *progressController;
 @property (nonatomic, strong) RZInfoController *infoController;
@@ -463,24 +514,51 @@ static NSString * const RZColMethod = @"method";
     }
     self.window.subtitle = doc.formatName.uppercaseString;
     [self.treeView reloadData];
-    [self.treeView expandItem:nil expandChildren:YES];
-    RZFolderNode *node = [doc.rootFolder nodeForPath:self.currentPath];
-    if (node) {
-        [self.treeView selectRowIndexes:[NSIndexSet indexSetWithIndex:[self.treeView rowForItem:node]]
+    [self rz_selectFolderNodeForPath:self.currentPath];
+    [self refreshVisibleItems];
+}
+
+// Expanding the whole tree is O(folders) and visually noisy on deep archives,
+// so only open the ancestors needed to reveal the current folder.
+- (void)rz_selectFolderNodeForPath:(NSString *)path {
+    RZFolderNode *root = self.archiveDocument.rootFolder;
+    RZFolderNode *cursor = root;
+    RZFolderNode *target = nil;
+    for (NSString *part in [path componentsSeparatedByString:@"/"]) {
+        if (part.length == 0) {
+            continue;
+        }
+        cursor = [cursor childNamed:part create:NO];
+        if (!cursor) {
+            return;
+        }
+        [self.treeView expandItem:cursor];
+        target = cursor;
+    }
+    if (!target) {
+        [self.treeView deselectAll:nil];
+        return;
+    }
+    const NSInteger row = [self.treeView rowForItem:target];
+    if (row >= 0) {
+        [self.treeView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row]
                    byExtendingSelection:NO];
     }
-    [self refreshVisibleItems];
 }
 
 - (void)refreshVisibleItems {
     RZDocument *doc = self.archiveDocument;
     NSArray<RZItem *> *items = [doc itemsInFolder:self.currentPath];
-    NSString *filter = self.searchField.stringValue.lowercaseString ?: @"";
+    NSString *filter = self.searchField.stringValue;
     if (filter.length) {
+        // Case- and diacritic-insensitive search avoids lowercasing both the
+        // name and the path of every item on each keystroke.
+        const NSStringCompareOptions options =
+            NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
         NSMutableArray<RZItem *> *filtered = [NSMutableArray array];
         for (RZItem *item in doc.items) {
-            if ([item.name.lowercaseString containsString:filter] ||
-                [item.path.lowercaseString containsString:filter]) {
+            if ([item.name rangeOfString:filter options:options].location != NSNotFound ||
+                [item.path rangeOfString:filter options:options].location != NSNotFound) {
                 [filtered addObject:item];
             }
         }
@@ -525,9 +603,17 @@ static NSString * const RZColMethod = @"method";
 }
 
 - (void)updatePathControl {
-    NSMutableArray<NSView *> *views = [NSMutableArray array];
     NSString *rootTitle = self.archiveDocument.fileURL.lastPathComponent
         ?: (self.archiveDocument.nestTitle ?: @"Archive");
+    // Each crumb builds stack views and configured symbol images, so skip the
+    // rebuild when neither the archive nor the folder changed.
+    NSString *signature = [NSString stringWithFormat:@"%@\n%@", rootTitle, self.currentPath];
+    if ([signature isEqualToString:self.renderedCrumbSignature]) {
+        return;
+    }
+    self.renderedCrumbSignature = signature;
+
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
     [views addObject:[self rz_crumbWithTitle:rootTitle symbol:@"archivebox.fill" tag:0]];
 
     NSArray<NSString *> *parts = self.currentPath.length ? [self.currentPath componentsSeparatedByString:@"/"] : @[];
@@ -559,8 +645,7 @@ static NSString * const RZColMethod = @"method";
 
 - (void)updateStatus {
     RZDocument *doc = self.archiveDocument;
-    NSByteCountFormatter *bytes = [[NSByteCountFormatter alloc] init];
-    bytes.countStyle = NSByteCountFormatterCountStyleFile;
+    NSByteCountFormatter *bytes = RZByteFormatter();
     NSInteger selected = self.tableView.numberOfSelectedRows;
     if (selected > 0) {
         __block unsigned long long size = 0;
@@ -645,7 +730,7 @@ static NSString * const RZColMethod = @"method";
     }
     RZFolderNode *node = item;
     cell.textField.stringValue = node.name ?: @"";
-    cell.imageView.image = [NSImage imageWithSystemSymbolName:@"folder.fill" accessibilityDescription:node.name];
+    cell.imageView.image = RZFolderIcon();
     return cell;
 }
 
@@ -701,29 +786,23 @@ static NSString * const RZColMethod = @"method";
         }
     }
 
-    NSByteCountFormatter *bytes = [[NSByteCountFormatter alloc] init];
-    bytes.countStyle = NSByteCountFormatterCountStyleFile;
     NSString *identifier = tableColumn.identifier;
     if ([identifier isEqualToString:RZColName]) {
         cell.textField.stringValue = item.name ?: @"";
-        if (item.isDir) {
-            cell.imageView.image = [NSImage imageWithSystemSymbolName:@"folder.fill" accessibilityDescription:item.name];
-        } else {
-            cell.imageView.image = [[NSWorkspace sharedWorkspace]
-                iconForContentType:[UTType typeWithFilenameExtension:item.name.pathExtension] ?: UTTypeData];
-        }
+        cell.imageView.image = item.isDir ? RZFolderIcon()
+                                          : RZIconForExtension(item.name.pathExtension);
     } else if ([identifier isEqualToString:RZColSize]) {
-        cell.textField.stringValue = item.isDir ? @"—" : [bytes stringFromByteCount:(long long)item.size];
+        cell.textField.stringValue = item.isDir ? @"—"
+            : [RZByteFormatter() stringFromByteCount:(long long)item.size];
         cell.textField.alignment = NSTextAlignmentRight;
     } else if ([identifier isEqualToString:RZColPacked]) {
-        cell.textField.stringValue = item.isDir ? @"—" : [bytes stringFromByteCount:(long long)item.packedSize];
+        cell.textField.stringValue = item.isDir ? @"—"
+            : [RZByteFormatter() stringFromByteCount:(long long)item.packedSize];
         cell.textField.alignment = NSTextAlignmentRight;
     } else if ([identifier isEqualToString:RZColModified]) {
         if (item.mtimeUnix > 0) {
             NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)item.mtimeUnix];
-            cell.textField.stringValue = [NSDateFormatter localizedStringFromDate:date
-                                                                        dateStyle:NSDateFormatterMediumStyle
-                                                                        timeStyle:NSDateFormatterShortStyle];
+            cell.textField.stringValue = [RZDateFormatter() stringFromDate:date];
         } else {
             cell.textField.stringValue = @"—";
         }
@@ -754,15 +833,7 @@ static NSString * const RZColMethod = @"method";
     RZItem *item = self.visibleItems[(NSUInteger)row];
     if (item.isDir) {
         self.currentPath = item.path;
-        RZFolderNode *node = [self.archiveDocument.rootFolder nodeForPath:item.path];
-        if (node) {
-            [self.treeView expandItem:nil expandChildren:YES];
-            NSInteger treeRow = [self.treeView rowForItem:node];
-            if (treeRow >= 0) {
-                [self.treeView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)treeRow]
-                           byExtendingSelection:NO];
-            }
-        }
+        [self rz_selectFolderNodeForPath:item.path];
     } else {
         [self viewSelection:self];
     }
@@ -890,7 +961,11 @@ static NSString * const RZColMethod = @"method";
 
 - (void)filterChanged:(id)sender {
     (void)sender;
-    [self refreshVisibleItems];
+    // Coalesce keystrokes: filtering walks every item in the archive.
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(refreshVisibleItems)
+                                               object:nil];
+    [self performSelector:@selector(refreshVisibleItems) withObject:nil afterDelay:0.15];
 }
 
 #pragma mark - Operations
@@ -915,6 +990,12 @@ static NSString * const RZColMethod = @"method";
            work:(void (^)(rz::ProgressPtr progress))work
      completion:(void (^)(NSError * _Nullable error))completion {
     if (self.busy) {
+        // Silently dropping the request left the user staring at a panel they
+        // had just confirmed, with nothing happening.
+        NSBeep();
+        if (completion) {
+            completion(RZError(@"Another archive operation is still running."));
+        }
         return;
     }
     self.busy = YES;
@@ -941,7 +1022,7 @@ static NSString * const RZColMethod = @"method";
         (void)t;
         uint64_t total = progress->total.load();
         uint64_t done = progress->processed.load();
-        NSString *file = RZNS(progress->currentFile);
+        NSString *file = RZNS(progress->takeCurrentFile());
         if (file.length) {
             [controller setStatus:file.lastPathComponent];
         }
@@ -1067,6 +1148,29 @@ static NSString * const RZColMethod = @"method";
     }
 }
 
+// Picks "name-1.txt", "name-2.txt", ... so flattening never destroys a file
+// that was already in the destination or one extracted moments earlier.
+- (NSString *)rz_availablePathIn:(NSString *)destination forName:(NSString *)name {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *candidate = [destination stringByAppendingPathComponent:name];
+    if (![fm fileExistsAtPath:candidate]) {
+        return candidate;
+    }
+    NSString *base = name.stringByDeletingPathExtension;
+    NSString *ext = name.pathExtension;
+    for (NSUInteger n = 1; n < 1000; n++) {
+        NSString *attempt = [NSString stringWithFormat:@"%@-%lu", base, (unsigned long)n];
+        if (ext.length) {
+            attempt = [attempt stringByAppendingPathExtension:ext];
+        }
+        candidate = [destination stringByAppendingPathComponent:attempt];
+        if (![fm fileExistsAtPath:candidate]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
 - (void)rz_flattenExtractedItems:(NSArray<RZItem *> *)items toDestination:(NSString *)destination {
     NSFileManager *fm = NSFileManager.defaultManager;
     for (RZItem *item in items) {
@@ -1075,12 +1179,12 @@ static NSString * const RZColMethod = @"method";
             continue;
         }
         NSString *source = [destination stringByAppendingPathComponent:archivePath];
-        NSString *target = [destination stringByAppendingPathComponent:item.name];
-        if ([source isEqualToString:target] || ![fm fileExistsAtPath:source]) {
+        if (![fm fileExistsAtPath:source]) {
             continue;
         }
-        if ([fm fileExistsAtPath:target]) {
-            [fm removeItemAtPath:target error:nil];
+        NSString *target = [self rz_availablePathIn:destination forName:item.name];
+        if (!target || [source isEqualToString:target]) {
+            continue;
         }
         if ([fm moveItemAtPath:source toPath:target error:nil]) {
             [self rz_removeEmptyParentsOf:source stoppingAt:destination];
@@ -1138,7 +1242,19 @@ static NSString * const RZColMethod = @"method";
 }
 
 - (void)extractAndOpenItem:(RZItem *)item {
-    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ReZipperView"];
+    // A per-launch subdirectory keeps archives with identical inner paths from
+    // colliding, and gives decrypted content a scope that ends with the app.
+    static NSString *session;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        session = [NSString stringWithFormat:@"ReZipperView-%@", NSUUID.UUID.UUIDString];
+        atexit_b(^{
+            [[NSFileManager defaultManager]
+                removeItemAtPath:[NSTemporaryDirectory() stringByAppendingPathComponent:session]
+                           error:nil];
+        });
+    });
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:session];
     [[NSFileManager defaultManager] createDirectoryAtPath:temp withIntermediateDirectories:YES attributes:nil error:nil];
     RZDocument *doc = self.archiveDocument;
     [self runWork:@"Opening…" work:^(rz::ProgressPtr progress) {
@@ -1353,11 +1469,14 @@ static NSString * const RZColMethod = @"method";
     NSString *name = item.name;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
-        NSData *data = nil;
+        RZPreviewContent *content = nil;
         try {
             const auto bytes = rz::Engine::instance().extractItem(
                 path, index, password, progress, nest, RZPreviewMaxBytes);
-            data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+            NSData *data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+            // Decoding stays on this queue: it is the slow part, and doing it
+            // on the main thread froze the UI for seconds on large text files.
+            content = [RZPreviewContent contentForData:data name:name];
         } catch (const std::exception& ex) {
             error = RZErrorFromException(ex);
         }
@@ -1379,7 +1498,7 @@ static NSString * const RZColMethod = @"method";
                 [self.previewController showPlaceholder:name message:error.localizedDescription];
                 return;
             }
-            [self.previewController showData:data name:name];
+            [self.previewController showContent:content name:name];
         });
     });
 }

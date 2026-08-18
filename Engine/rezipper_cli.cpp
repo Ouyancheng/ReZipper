@@ -15,21 +15,42 @@ static void usage() {
               << "  rezipper-cli --lib <7z.so> remove <archive> <index...>\n";
 }
 
-static std::vector<std::uint32_t> parseNest(const std::string& spec) {
-    std::vector<std::uint32_t> nest;
+// Returns false on anything that is not a plain unsigned number, so bad input
+// reports usage instead of terminating on an uncaught std::invalid_argument.
+static bool parseIndex(const std::string& token, std::uint32_t& out) {
+    if (token.empty() || token.find_first_not_of("0123456789") != std::string::npos) {
+        return false;
+    }
+    try {
+        const unsigned long value = std::stoul(token);
+        if (value > 0xFFFFFFFFul) {
+            return false;
+        }
+        out = static_cast<std::uint32_t>(value);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+static bool parseNest(const std::string& spec, std::vector<std::uint32_t>& nest) {
     std::size_t start = 0;
     while (start < spec.size()) {
         const auto comma = spec.find(',', start);
         const auto token = spec.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
         if (!token.empty()) {
-            nest.push_back(static_cast<std::uint32_t>(std::stoul(token)));
+            std::uint32_t index = 0;
+            if (!parseIndex(token, index)) {
+                return false;
+            }
+            nest.push_back(index);
         }
         if (comma == std::string::npos) {
             break;
         }
         start = comma + 1;
     }
-    return nest;
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -46,7 +67,10 @@ int main(int argc, char** argv) {
         } else if ((arg == "--password" || arg == "--pass") && i + 1 < argc) {
             password = argv[++i];
         } else if (arg == "--nest" && i + 1 < argc) {
-            nest = parseNest(argv[++i]);
+            if (!parseNest(argv[++i], nest)) {
+                std::cerr << "Error: --nest expects a comma-separated list of item indices\n";
+                return 2;
+            }
         } else if (arg == "--encrypt-headers") {
             encryptHeaders = true;
         } else if (arg == "--no-solid") {
@@ -141,7 +165,12 @@ int main(int argc, char** argv) {
             }
             std::vector<std::uint32_t> indices;
             for (size_t i = 2; i < args.size(); ++i) {
-                indices.push_back(static_cast<std::uint32_t>(std::stoul(args[i])));
+                std::uint32_t index = 0;
+                if (!parseIndex(args[i], index)) {
+                    std::cerr << "Error: '" << args[i] << "' is not a valid item index\n";
+                    return 2;
+                }
+                indices.push_back(index);
             }
             auto progress = std::make_shared<rz::Progress>();
             rz::Engine::instance().remove(args[1], indices, "", progress);
